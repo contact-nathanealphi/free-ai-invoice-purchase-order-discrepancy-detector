@@ -1,0 +1,17 @@
+{
+  "name": "AI Invoice & Purchase Order Discrepancy Detector",
+  "short_name": "Invoice-PO AI",
+  "description": "Local-first B2B Invoice vs Purchase Order 3-Way Match & Forensic Audit Platform",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAFAFA",
+  "theme_color": "#18181B",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='36' fill='%2318181B'/><text x='50%' y='54%' dominant-baseline='middle' text-anchor='middle' fill='white' font-size='96' font-family='sans-serif' font-weight='bold'>AI</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

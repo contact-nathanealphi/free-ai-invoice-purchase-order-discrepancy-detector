@@ -1,0 +1,511 @@
+{
+  "name": "Automated Invoice vs. PO Discrepancy Detector",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "AP Invoice Audit Upload",
+        "formDescription": "Upload a B2B vendor PDF invoice to run Gemini 3.8 Flash extraction and 5-gate deterministic PO audit.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "invoice_file",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".pdf",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-form-trigger",
+      "name": "n8n Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        240
+      ],
+      "webhookId": "ap-invoice-audit-form"
+    },
+    {
+      "parameters": {
+        "operation": "binaryToPropery",
+        "binaryPropertyName": "invoice_file",
+        "destinationKey": "pdf_base64",
+        "options": {}
+      },
+      "id": "node-convert-base64",
+      "name": "Extract/Convert to Base64",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        240,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "YOUR_GEMINI_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  system_instruction: {\n    parts: [{\n      text: \"Anda adalah Spesialis Ekstraksi Data Accounts Payable (AP) senior untuk faktur B2B di Indonesia (mata uang Rupiah / IDR).\\n\\nTugas Anda adalah membaca dokumen PDF faktur yang dilampirkan dan mengekstrak seluruh field ke dalam JSON sesuai skema yang ditentukan.\\n\\nATURAN EKSTRAKSI KETAT:\\n1. Mata Uang & Format Angka:\\n   - Seluruh nilai moneter (unit_price, subtotal, tax_amount, grand_total) dan qty HARUS diekstrak sebagai angka murni (numeric) tanpa simbol \\\"Rp\\\", tanpa pemisah ribuan (titik/koma), dan tanpa teks tambahan.\\n   - Ekstrak angka PERSIS seperti yang tercetak pada faktur. DILARANG mengoreksi, menghitung ulang, atau membenarkan kesalahan hitung PPN/total maupun selisih harga dari dokumen sumber.\\n\\n2. Penilaian `confidence_score` (WAJIB, rentang 0.0 sampai 1.0):\\n   - 0.90 - 1.00: Dokumen tajam, tegak lurus, bebas noise, dan seluruh field vital (invoice_number, po_number, vendor_name, qty, unit_price, subtotal, tax_amount, grand_total) terbaca 100% jelas tanpa keraguan.\\n   - 0.80 - 0.89: Terdapat sedikit artefak minor, namun seluruh angka dan nomor referensi vital masih dapat dibaca dengan pasti.\\n   - DI BAWAH 0.80 (< 0.80) — WAJIB: Jika hasil scan miring, buram/blur, berbayang, terkena noise berat, terpotong, atau ada satu saja angka/nomor vital yang tidak terbaca jelas atau meragukan, Anda DILARANG KERAS mengarang, menebak, atau melakukan ekstrapolasi nilai. Anda WAJIB menurunkan `confidence_score` di bawah 0.80 (misalnya 0.35 - 0.75) dan menuliskan penyebab ketidakjelasan secara spesifik di `extraction_notes`.\\n\\n3. Kelengkapan & Kejujuran Data:\\n   - Pastikan `invoice_number`, `po_number`, dan `vendor_name` diekstrak persis sesuai ejaan dan format pada faktur.\\n   - Gunakan `extraction_notes` untuk mencatat kondisi fisik dokumen atau anomali pembacaan OCR (atau isi \\\"Dokumen terbaca jelas\\\" jika normal).\"\n    }]\n  },\n  contents: [{\n    role: \"user\",\n    parts: [\n      { text: \"Ekstrak seluruh field faktur B2B dari dokumen PDF terlampir sesuai skema JSON yang ditentukan.\" },\n      { inline_data: { mime_type: \"application/pdf\", data: $json.pdf_base64 } }\n    ]\n  }],\n  generationConfig: {\n    temperature: 0,\n    responseMimeType: \"application/json\",\n    responseSchema: {\n      type: \"OBJECT\",\n      properties: {\n        invoice_number: { type: \"STRING\", description: \"Nomor faktur resmi yang tertera pada dokumen\" },\n        po_number: { type: \"STRING\", description: \"Nomor Purchase Order (PO) yang direferensikan pada faktur\" },\n        vendor_name: { type: \"STRING\", description: \"Nama perusahaan vendor penerbit faktur\" },\n        item_name: { type: \"STRING\", description: \"Nama atau deskripsi barang/jasa utama yang ditagihkan\" },\n        qty: { type: \"NUMBER\", description: \"Kuantitas/jumlah unit barang atau jasa yang ditagihkan\" },\n        unit_price: { type: \"NUMBER\", description: \"Harga satuan dalam IDR sebagai angka murni tanpa simbol mata uang\" },\n        subtotal: { type: \"NUMBER\", description: \"Subtotal tagihan sebelum pajak/PPN dalam IDR\" },\n        tax_amount: { type: \"NUMBER\", description: \"Nominal PPN/pajak yang tercetak pada faktur dalam IDR\" },\n        grand_total: { type: \"NUMBER\", description: \"Total akhir tagihan (Grand Total) dalam IDR\" },\n        confidence_score: { type: \"NUMBER\", description: \"Skor keyakinan pembacaan dokumen dari 0.0 hingga 1.0 (< 0.80 jika buram, miring, noise, atau angka vital tidak jelas)\" },\n        extraction_notes: { type: \"STRING\", description: \"Catatan kualitas scan, bagian yang buram/miring/noise, atau catatan ekstraksi lainnya\" }\n      },\n      required: [\n        \"invoice_number\", \"po_number\", \"vendor_name\", \"item_name\", \"qty\",\n        \"unit_price\", \"subtotal\", \"tax_amount\", \"grand_total\", \"confidence_score\", \"extraction_notes\"\n      ]\n    }\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "node-gemini-http",
+      "name": "HTTP Request - Gemini Extraction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_DOCUMENT_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Master_PO",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read-master-po",
+      "name": "Read Master_PO",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        240
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_DOCUMENT_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Invoice_Audit_Log",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "node-read-audit-log",
+      "name": "Read Invoice_Audit_Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        240
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const CONFIDENCE_THRESHOLD = 0.85;\nconst TAX_RATE = 0.11;\nconst ROUNDING_TOLERANCE_IDR = 100;\n\nfunction toFiniteNumber(value) {\n  if (value === null || value === undefined || value === '') {\n    return NaN;\n  }\n  const num = Number(value);\n  return Number.isFinite(num) ? num : NaN;\n}\n\nfunction toTrimmedString(value) {\n  if (value === null || value === undefined) {\n    return '';\n  }\n  return String(value).trim();\n}\n\nfunction formatIDR(amount) {\n  const sign = amount < 0 ? '-' : '';\n  return `${sign}Rp${Math.abs(Math.round(amount)).toLocaleString('id-ID')}`;\n}\n\nfunction buildAuditResult(payload) {\n  return {\n    invoice_number: payload.invoice_number,\n    po_number: payload.po_number,\n    vendor_name: payload.vendor_name,\n    invoiced_total: payload.invoiced_total,\n    po_total: payload.po_total,\n    variance: payload.variance,\n    confidence_score: payload.confidence_score,\n    audit_status: payload.audit_status,\n    discrepancy_reason: payload.discrepancy_reason,\n    requires_human_review: payload.requires_human_review,\n    checked_rules: payload.checked_rules,\n    audited_at: new Date().toISOString(),\n  };\n}\n\nfunction auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = []) {\n  const invoice = extractedInvoice && typeof extractedInvoice === 'object' ? extractedInvoice : {};\n  const poList = Array.isArray(masterPOList) ? masterPOList : [];\n  const auditLogs = Array.isArray(existingAuditLogs) ? existingAuditLogs : [];\n\n  const invoiceNumber = toTrimmedString(invoice.invoice_number) || null;\n  const poNumber = toTrimmedString(invoice.po_number) || null;\n  const vendorName = toTrimmedString(invoice.vendor_name) || null;\n\n  const confidenceScore = toFiniteNumber(invoice.confidence_score);\n  const invoicedTotal = toFiniteNumber(\n    invoice.grand_total ?? invoice.billed_total ?? invoice.invoiced_total\n  );\n  const invoicedTax = toFiniteNumber(invoice.tax ?? invoice.tax_amount ?? invoice.billed_tax_11);\n  const invoicedQty = toFiniteNumber(invoice.qty);\n  const invoicedUnitPrice = toFiniteNumber(invoice.unit_price ?? invoice.billed_unit_price);\n\n  const checkedRules = [];\n  const basePayload = {\n    invoice_number: invoiceNumber,\n    po_number: poNumber,\n    vendor_name: vendorName,\n    invoiced_total: Number.isFinite(invoicedTotal) ? invoicedTotal : null,\n    po_total: null,\n    variance: null,\n    confidence_score: Number.isFinite(confidenceScore) ? confidenceScore : null,\n    checked_rules: checkedRules,\n  };\n\n  checkedRules.push('GATE_1_CONFIDENCE_THRESHOLD');\n  if (!Number.isFinite(confidenceScore) || confidenceScore < CONFIDENCE_THRESHOLD) {\n    const scoreDisplay = Number.isFinite(confidenceScore) ? confidenceScore : 'null/invalid';\n    return buildAuditResult({\n      ...basePayload,\n      audit_status: 'HUMAN REVIEW',\n      discrepancy_reason: `Confidence score OCR (${scoreDisplay}) berada di bawah ambang batas ${CONFIDENCE_THRESHOLD}.`,\n      requires_human_review: true,\n    });\n  }\n\n  checkedRules.push('GATE_2_DUPLICATE_CHECK');\n  if (invoiceNumber && vendorName) {\n    const invKey = invoiceNumber.toLowerCase();\n    const vendorKey = vendorName.toLowerCase();\n    const isDuplicate = auditLogs.some(\n      (log) =>\n        log &&\n        toTrimmedString(log.invoice_number).toLowerCase() === invKey &&\n        toTrimmedString(log.vendor_name).toLowerCase() === vendorKey\n    );\n\n    if (isDuplicate) {\n      return buildAuditResult({\n        ...basePayload,\n        audit_status: 'HOLD - DUPLICATE',\n        discrepancy_reason: `Duplicate billing terdeteksi untuk invoice \"${invoiceNumber}\" dari vendor \"${vendorName}\".`,\n        requires_human_review: true,\n      });\n    }\n  }\n\n  checkedRules.push('GATE_3_PO_VALIDATION');\n  const matchedPO = poNumber\n    ? poList.find((po) => po && toTrimmedString(po.po_number).toLowerCase() === poNumber.toLowerCase())\n    : null;\n\n  if (!matchedPO) {\n    return buildAuditResult({\n      ...basePayload,\n      audit_status: 'HOLD - INVALID PO',\n      discrepancy_reason: `PO \"${poNumber || 'kosong'}\" tidak ditemukan di Master PO.`,\n      requires_human_review: true,\n    });\n  }\n\n  const poStatus = toTrimmedString(matchedPO.status).toUpperCase();\n  if (poStatus !== 'OPEN') {\n    return buildAuditResult({\n      ...basePayload,\n      audit_status: 'HOLD - INVALID PO',\n      discrepancy_reason: `PO \"${poNumber}\" berstatus \"${toTrimmedString(matchedPO.status) || 'UNKNOWN'}\", bukan OPEN.`,\n      requires_human_review: true,\n    });\n  }\n\n  const poQty = toFiniteNumber(matchedPO.qty);\n  const poUnitPrice = toFiniteNumber(matchedPO.unit_price);\n  const poSubtotal = Number.isFinite(toFiniteNumber(matchedPO.expected_subtotal))\n    ? toFiniteNumber(matchedPO.expected_subtotal)\n    : poQty * poUnitPrice;\n  const poTax = Number.isFinite(toFiniteNumber(matchedPO.expected_tax_11))\n    ? toFiniteNumber(matchedPO.expected_tax_11)\n    : Math.round(poSubtotal * TAX_RATE);\n  const poTotal = Number.isFinite(toFiniteNumber(matchedPO.expected_total))\n    ? toFiniteNumber(matchedPO.expected_total)\n    : poSubtotal + poTax;\n\n  basePayload.po_total = Number.isFinite(poTotal) ? poTotal : null;\n\n  if (!Number.isFinite(invoicedQty) || !Number.isFinite(invoicedUnitPrice) || !Number.isFinite(invoicedTotal)) {\n    return buildAuditResult({\n      ...basePayload,\n      audit_status: 'HUMAN REVIEW',\n      discrepancy_reason: 'Field numerik invoice (qty, unit_price, atau grand_total) kosong atau tidak valid.',\n      requires_human_review: true,\n    });\n  }\n\n  checkedRules.push('GATE_4_DETERMINISTIC_MATH_TAX');\n  const expectedSubtotal = invoicedQty * invoicedUnitPrice;\n  const expectedTax = Math.round(expectedSubtotal * TAX_RATE);\n  const expectedTotal = expectedSubtotal + expectedTax;\n\n  const taxDiff = Number.isFinite(invoicedTax) ? invoicedTax - expectedTax : 0;\n  const totalDiff = invoicedTotal - expectedTotal;\n\n  if (\n    (Number.isFinite(invoicedTax) && Math.abs(taxDiff) > ROUNDING_TOLERANCE_IDR) ||\n    Math.abs(totalDiff) > ROUNDING_TOLERANCE_IDR\n  ) {\n    const nominalDiff = Math.abs(totalDiff) > ROUNDING_TOLERANCE_IDR ? totalDiff : taxDiff;\n    return buildAuditResult({\n      ...basePayload,\n      variance: nominalDiff,\n      audit_status: 'HOLD - TAX ERROR',\n      discrepancy_reason:\n        `Kesalahan perhitungan PPN 11% / Grand Total sebesar ${formatIDR(nominalDiff)} ` +\n        `(tertagih ${formatIDR(invoicedTotal)}, seharusnya ${formatIDR(expectedTotal)}; ` +\n        `PPN 11% seharusnya ${formatIDR(expectedTax)}).`,\n      requires_human_review: true,\n    });\n  }\n\n  checkedRules.push('GATE_5_PO_MATCHING_VARIANCE');\n  const poVariance = invoicedTotal - poTotal;\n  const hasQtyMismatch = invoicedQty !== poQty;\n  const hasUnitPriceMismatch = Math.abs(invoicedUnitPrice - poUnitPrice) > ROUNDING_TOLERANCE_IDR;\n  const hasTotalMismatch = Math.abs(poVariance) > ROUNDING_TOLERANCE_IDR;\n\n  if (hasQtyMismatch || hasUnitPriceMismatch || hasTotalMismatch) {\n    const reasons = [];\n    if (hasQtyMismatch) {\n      reasons.push(`qty tertagih ${invoicedQty} vs PO ${poQty}`);\n    }\n    if (hasUnitPriceMismatch) {\n      reasons.push(`harga satuan tertagih ${formatIDR(invoicedUnitPrice)} vs PO ${formatIDR(poUnitPrice)}`);\n    }\n    if (hasTotalMismatch) {\n      reasons.push(`selisih grand total ${formatIDR(poVariance)}`);\n    }\n\n    return buildAuditResult({\n      ...basePayload,\n      variance: poVariance,\n      audit_status: 'HOLD - PRICE VARIANCE',\n      discrepancy_reason: `Ketidaksesuaian terhadap PO \"${poNumber}\": ${reasons.join('; ')}.`,\n      requires_human_review: true,\n    });\n  }\n\n  return buildAuditResult({\n    ...basePayload,\n    variance: poVariance,\n    audit_status: 'APPROVED',\n    discrepancy_reason: null,\n    requires_human_review: false,\n  });\n}\n\nconst geminiResponse = $('HTTP Request - Gemini Extraction').first().json || {};\nconst rawText = geminiResponse.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\nlet extractedInvoice = {};\ntry {\n  extractedInvoice = typeof rawText === 'string' ? JSON.parse(rawText) : rawText;\n} catch {\n  extractedInvoice = { confidence_score: 0 };\n}\n\nconst masterPOList = $('Read Master_PO').all().map((item) => item.json).filter((row) => row && row.po_number);\nconst existingAuditLogs = $('Read Invoice_Audit_Log').all().map((item) => item.json).filter((row) => row && row.invoice_number);\n\nconst auditResult = auditInvoice(extractedInvoice, masterPOList, existingAuditLogs);\nreturn [{ json: auditResult }];"
+      },
+      "id": "node-audit-code",
+      "name": "Deterministic Audit Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.audit_status }}",
+                    "rightValue": "APPROVED",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "APPROVED"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.audit_status }}",
+                    "rightValue": "HUMAN REVIEW",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "HUMAN_REVIEW"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.audit_status }}",
+                    "rightValue": "HOLD -",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "HOLD_ANOMALY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-switch-router",
+      "name": "Switch - Audit Status Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1440,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_DOCUMENT_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Invoice_Audit_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "node-append-approved",
+      "name": "Append Invoice_Audit_Log (Approved)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1720,
+        60
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_DOCUMENT_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Human_Review_Queue",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "node-append-human-review",
+      "name": "Append Human_Review_Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1720,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "ap-automation@example.com",
+        "toEmail": "finance-manager@example.com",
+        "subject": "=[HUMAN REVIEW] Invoice {{ $json.invoice_number || 'UNKNOWN' }} ({{ $json.vendor_name || 'Unknown Vendor' }})",
+        "text": "=Manual review required for uploaded invoice.\n\nInvoice Number: {{ $json.invoice_number }}\nPO Number: {{ $json.po_number }}\nVendor: {{ $json.vendor_name }}\nConfidence Score: {{ $json.confidence_score }}\nStatus: {{ $json.audit_status }}\nReason: {{ $json.discrepancy_reason }}\n\nPlease inspect the PDF in the Human_Review_Queue tab.",
+        "options": {}
+      },
+      "id": "node-alert-human-review",
+      "name": "Alert Finance Manager (Human Review)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1980,
+        240
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_EMAIL_OR_TELEGRAM_CREDENTIAL_ID",
+          "name": "SMTP / Alert Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_DOCUMENT_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Invoice_Audit_Log",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "node-append-hold",
+      "name": "Append Invoice_Audit_Log (Hold)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1720,
+        420
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "ap-automation@example.com",
+        "toEmail": "finance-manager@example.com",
+        "subject": "=[{{ $json.audit_status }}] Invoice {{ $json.invoice_number || 'UNKNOWN' }} Flagged",
+        "text": "=Invoice discrepancy detected by Deterministic AP Audit Engine.\n\nAudit Status: {{ $json.audit_status }}\nInvoice Number: {{ $json.invoice_number }}\nPO Number: {{ $json.po_number }}\nVendor: {{ $json.vendor_name }}\nInvoiced Total: {{ $json.invoiced_total }}\nPO Total: {{ $json.po_total }}\nVariance (IDR): {{ $json.variance }}\nReason: {{ $json.discrepancy_reason }}\nChecked Rules: {{ ($json.checked_rules || []).join(', ') }}",
+        "options": {}
+      },
+      "id": "node-alert-hold",
+      "name": "Alert Finance Manager (Discrepancy Hold)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1980,
+        420
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_EMAIL_OR_TELEGRAM_CREDENTIAL_ID",
+          "name": "SMTP / Alert Credential"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "n8n Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract/Convert to Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract/Convert to Base64": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Gemini Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Gemini Extraction": {
+      "main": [
+        [
+          {
+            "node": "Read Master_PO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Master_PO": {
+      "main": [
+        [
+          {
+            "node": "Read Invoice_Audit_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Invoice_Audit_Log": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Audit Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deterministic Audit Engine": {
+      "main": [
+        [
+          {
+            "node": "Switch - Audit Status Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch - Audit Status Router": {
+      "main": [
+        [
+          {
+            "node": "Append Invoice_Audit_Log (Approved)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Append Human_Review_Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Append Invoice_Audit_Log (Hold)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Human_Review_Queue": {
+      "main": [
+        [
+          {
+            "node": "Alert Finance Manager (Human Review)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Invoice_Audit_Log (Hold)": {
+      "main": [
+        [
+          {
+            "node": "Alert Finance Manager (Discrepancy Hold)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "00000000-0000-0000-0000-000000000001",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

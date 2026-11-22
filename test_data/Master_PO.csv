@@ -1,0 +1,9 @@
+po_number,vendor_name,item_name,qty,unit_price,expected_subtotal,expected_tax_11,expected_total,status
+PO-2026-001,PT Nusantara Logistik,Sewa Armada Truk Box Engkel (Jakarta-Surabaya),4,4500000,18000000,1980000,19980000,OPEN
+PO-2026-002,CV Teknologi Kantor,Lisensi Software Akuntansi Enterprise (Tahunan),10,2500000,25000000,2750000,27750000,OPEN
+PO-2026-003,PT Sumber Kemasan,Kardus Corrugated Double Wall 60x40x40 cm,2000,18500,37000000,4070000,41070000,OPEN
+PO-2026-004,PT Mitra Baja Mandiri,Rak Gudang Heavy Duty 4 Susun (Kapasitas 2 Ton),12,3200000,38400000,4224000,42624000,OPEN
+PO-2026-005,PT Solusi Cloud Nusantara,Managed Cloud Server & Backup Storage (Paket Pro),6,5500000,33000000,3630000,36630000,OPEN
+PO-2026-006,CV Prima Kerta Abadi,Kertas HVS A4 80gsm (Box isi 5 Rim),150,240000,36000000,3960000,39960000,OPEN
+PO-2026-007,PT Garda Sinergi Elektrika,UPS Industrial 5kVA Rackmount + Instalasi,3,12000000,36000000,3960000,39960000,OPEN
+PO-2026-008,PT Sentosa Kimia Industri,Cairan Pembersih Lantai Industri (Jerigen 20L),80,350000,28000000,3080000,31080000,OPEN

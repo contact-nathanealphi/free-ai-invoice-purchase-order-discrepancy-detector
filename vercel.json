@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 30,
+      "includeFiles": "{prompts,src,test_data,test_data_wild}/**"
+    }
+  }
+}

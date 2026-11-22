@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background-color: #FAFAFA;
+  color: #18181B;
+}
+
+.font-mono,
+.tabular-nums {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@media print {
+  aside,
+  header,
+  #transparencyBanner,
+  #viewOverview,
+  #viewPos,
+  #viewPolicies,
+  #viewCfo,
+  #viewApi,
+  #viewLedger {
+    display: none !important;
+  }
+  #diffModal {
+    position: static !important;
+    background: white !important;
+    padding: 0 !important;
+  }
+  #diffModal > div {
+    border: none !important;
+    height: auto !important;
+    max-width: 100% !important;
+  }
+  #pdfPreviewColumn {
+    display: none !important;
+  }
+}

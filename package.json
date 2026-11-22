@@ -1,0 +1,25 @@
+{
+  "name": "invoice-po-discrepancy-detector",
+  "version": "3.0.0",
+  "description": "Automated Invoice vs. PO Discrepancy Detector with 3-Way Match, Gemini AI Extraction, and Executive AP Command Center",
+  "main": "src/auditEngine.js",
+  "scripts": {
+    "test": "node --test",
+    "dev": "node src/localServer.js",
+    "build": "npm run build:css",
+    "build:css": "tailwindcss -i ./src/input.css -o ./public/styles.css --minify",
+    "benchmark:mock": "node src/runE2EBenchmark.js --mock",
+    "benchmark:live": "node src/runE2EBenchmark.js --live"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "pdf-parse": "^1.1.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1",
+    "tailwindcss": "^3.4.19"
+  }
+}

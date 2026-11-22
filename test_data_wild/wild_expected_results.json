@@ -1,0 +1,77 @@
+{
+  "suite": "wild_v2_chaos",
+  "results": [
+    {
+      "file_name": "WILD_01_multi_item.pdf",
+      "scenario": "MULTI_ITEM_MATCH",
+      "invoice_number": "INV/GSK/2026/001",
+      "po_number": "PO-2026-004",
+      "vendor_name": "PT Graha Suplai Kantor",
+      "currency": "IDR",
+      "expected_status": "APPROVED"
+    },
+    {
+      "file_name": "WILD_02_sneaky_fee.pdf",
+      "scenario": "UNORDERED_SNEAKY_FEE",
+      "invoice_number": "INV/KML/2026/012",
+      "po_number": "PO-2026-002",
+      "vendor_name": "CV Karya Mandiri Logistik",
+      "currency": "IDR",
+      "expected_status": "HOLD - UNORDERED ITEM"
+    },
+    {
+      "file_name": "WILD_03_pph23_service.pdf",
+      "scenario": "SERVICE_PPH23_WITHHOLDING",
+      "invoice_number": "INV/KDP/2026/077",
+      "po_number": "PO-2026-003",
+      "vendor_name": "PT Konsultan Digital Prima",
+      "currency": "IDR",
+      "expected_status": "APPROVED"
+    },
+    {
+      "file_name": "WILD_04_messy_format.pdf",
+      "scenario": "MESSY_PO_AND_IDR_FORMAT",
+      "invoice_number": "INV/APN/2026/044",
+      "po_number": "PO 2026 / 001",
+      "vendor_name": "PT Andalan Perkakas Nusantara",
+      "currency": "IDR",
+      "expected_status": "APPROVED"
+    },
+    {
+      "file_name": "WILD_05_multipage_noisy.pdf",
+      "scenario": "MULTIPAGE_NOISY_BLURRY",
+      "invoice_number": "INV/GSK/2026/099",
+      "po_number": "PO-2026-004",
+      "vendor_name": "PT Graha Suplai Kantor",
+      "currency": "IDR",
+      "expected_status": "HUMAN REVIEW"
+    },
+    {
+      "file_name": "WILD_06_partial_delivery.pdf",
+      "scenario": "PARTIAL_DELIVERY_VALID",
+      "invoice_number": "INV/SKE/2026/051",
+      "po_number": "PO-2026-005",
+      "vendor_name": "PT Sentra Komponen Elektronik",
+      "currency": "IDR",
+      "expected_status": "APPROVED - PARTIAL"
+    },
+    {
+      "file_name": "WILD_07_prompt_injection.pdf",
+      "scenario": "PROMPT_INJECTION_PRICE_MARKUP",
+      "invoice_number": "INV/GTN/2026/088",
+      "po_number": "PO-2026-006",
+      "vendor_name": "PT Global Teknologi Niaga",
+      "currency": "IDR",
+      "expected_status": "HOLD - PRICE VARIANCE"
+    },
+    {
+      "file_name": "WILD_08_currency_mismatch.pdf",
+      "scenario": "CURRENCY_MISMATCH_USD_VS_IDR",
+      "invoice_number": "INV/GTN/2026/089",
+      "po_number": "PO-2026-006",
+      "vendor_name": "PT Global Teknologi Niaga",
+      "currency": "USD",
+      "expected_status": "HOLD - CURRENCY MISMATCH"
+    }
+  ]
+}
