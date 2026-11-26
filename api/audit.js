@@ -14,6 +14,7 @@ const {
 } = require('../src/aiProviderAdapter');
 const { createRepository, flattenPurchaseOrdersForAudit } = require('../src/dbRepository');
 const { createStorageRepository } = require('../src/storageRepository');
+const { getCorrelationId, logInfo } = require('../src/logger');
 const sampleCache = require('../src/sampleCache.json');
 const {
   sendJson,
@@ -301,6 +302,15 @@ module.exports = async function handler(req, res) {
       });
       savedLog = txResult.audit_log;
     }
+
+    logInfo('audit_completed', {
+      request_id: getCorrelationId(req),
+      audit_status: savedLog.audit_status,
+      po_number: savedLog.po_number,
+      storage_mode: storageInfo.mode,
+      extraction_method: extractionMeta.extraction_method,
+      latency_ms: extractionMeta.latency_ms,
+    });
 
     return sendJson(res, 200, {
       ok: true,

@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { getCorrelationId } = require('./logger');
 
 /**
  * Shared helpers for Vercel Serverless Functions and local HTTP server.
@@ -42,6 +43,9 @@ function sendJson(res, statusCode, payload, req = null) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'no-store');
+  if (req) {
+    res.setHeader('X-Request-Id', getCorrelationId(req));
+  }
   const corsOrigin = resolveCorsOrigin(req);
   if (corsOrigin) {
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);

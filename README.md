@@ -1,8 +1,27 @@
 # AI Invoice & Purchase Order Discrepancy Detector
 
+[![CI Quality Gate](https://github.com/contact-nathanealphi/free-ai-invoice-purchase-order-discrepancy-detector/actions/workflows/ci.yml/badge.svg)](https://github.com/contact-nathanealphi/free-ai-invoice-purchase-order-discrepancy-detector/actions/workflows/ci.yml)
+![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![Version](https://img.shields.io/badge/version-6.0.0-zinc)
+
 An enterprise-grade Accounts Payable (AP) audit, fraud-prevention, and 3-Way Match platform that pairs **Hybrid AI Document Extraction** (Google Gemini, OpenAI, Anthropic Claude, or **100% Offline Local AI via Ollama / LM Studio**) with a **6-Gate Deterministic Audit Engine**, **0-Token Forensic Analytics**, **Maker-Checker RBAC Governance**, and **Multi-Instance Serverless Persistence**.
 
 Designed to run either **Zero-Config Local-First** (private browser IndexedDB + AES-256-GCM `.auditvault` backup) or as a **Multi-Instance Enterprise Cloud Deployment** (Supabase Postgres ACID RPC + Private Object Storage Signed URLs + Upstash Redis Distributed Rate Limiting).
+
+```mermaid
+flowchart LR
+  A["Intake (PDF / Image / Text / ZIP)"] --> B["Hybrid Reader (Markdown / Vision)"]
+  B --> C["AI Extractor (Gemini / BYOK / Ollama)"]
+  C --> D["6-Gate Deterministic Engine + Anti-BEC"]
+  D --> E["0-Token Forensic Analytics"]
+  E --> F{"Persistence"}
+  F -- "Local-First" --> G["IndexedDB + AES-256 Vault"]
+  F -- "Enterprise Cloud" --> H["Supabase Storage + Postgres ACID RPC + Upstash Redis"]
+  H --> I["Maker-Checker RBAC + Immutable audit_events"]
+```
+
+> Full technical architecture & ADRs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · OpenAPI 3.1 Spec: [docs/openapi.yaml](docs/openapi.yaml) · Security Policy: [SECURITY.md](SECURITY.md)
 
 ---
 
@@ -42,7 +61,7 @@ Zero LLM hallucinations on financial math — every invoice passes through deter
 
 | Verification Suite | Command / Runner | Result | Measured Metrics |
 | :--- | :--- | :--- | :--- |
-| **Unit, Security & Enterprise Regression** | `node --test` | **79/79 PASS (100%)** | 0 fail (~527ms); covers Gates 1–6, RBAC/SoD, Anti-BEC, Split-Line, Upstash Redis, ACID RPC, Storage Signed URLs, XSS/CSV hardening |
+| **Unit, Security & Enterprise Regression** | `node --test` | **83/83 PASS (100%)** | 0 fail (~480ms); covers Gates 1–6, RBAC/SoD, Anti-BEC, Split-Line, Upstash Redis, ACID RPC, Storage Signed URLs, `/api/health`, Logger, XSS/CSV hardening |
 | **Clean E2E Benchmark** | `npm run benchmark:mock` | **10/10 MATCH (100%)** | 0 mismatch across standard AP scenarios |
 | **Wild Chaos Stress Test v2** | `node src/runStressTest.js --mock` | **8/8 PASS (100%)** | Multi-item, sneaky fee, PPh 23 service, messy format, blurry scan, partial delivery, prompt injection, currency mismatch |
 | **Enterprise Superstress & Red-Team** | 5,000-invoice throughput + 40 parallel HTTP requests | **9/9 PASS (100%)** | **~44,281 invoices/sec** (5,000 audits in `112.9ms`, `p95 = 0.047ms`, `p99 = 0.071ms`); 500-log forensic scan `7.27ms`; 40 concurrent HTTP requests (`0` errors, `10/10` concurrent writes persisted); RBAC escalation & path traversal blocked |

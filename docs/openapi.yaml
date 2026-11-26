@@ -1,0 +1,126 @@
+openapi: 3.1.0
+info:
+  title: AI Invoice & Purchase Order Discrepancy Detector API
+  version: 6.0.0
+  description: Enterprise AP 6-Gate Deterministic Audit, Anti-BEC Vendor Guard, Maker-Checker RBAC, and Immutable Audit Trail API.
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+paths:
+  /api/health:
+    get:
+      summary: Service readiness and active infrastructure capabilities
+      responses:
+        '200':
+          description: Service healthy with capability flags (db_mode, redis_limiter, storage_mode, rbac_enabled)
+  /api/dashboard:
+    get:
+      summary: Fetch Purchase Orders, Audit Logs, KPIs, and storage mode
+      parameters:
+        - name: seed
+          in: query
+          schema:
+            type: string
+            enum: ['1']
+          description: Read-only default seed payload for stateless client workspaces
+      responses:
+        '200':
+          description: Dashboard payload
+        '401':
+          description: Unauthorized when ADMIN_API_TOKEN is configured
+  /api/audit:
+    post:
+      summary: Extract and audit an invoice against Master PO, GRN, and Vendor Master
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fileName: { type: string }
+                fileBase64: { type: string }
+                mimeType: { type: string }
+                rawText: { type: string }
+                sampleId: { type: string }
+      responses:
+        '200':
+          description: Audit result, forensic signals, and storage signed URL (when Supabase Storage is active)
+        '429':
+          description: Daily demo quota exceeded
+  /api/resolve:
+    post:
+      summary: Resolve a flagged audit log with Maker-Checker RBAC & SoD enforcement
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, action]
+              properties:
+                id: { type: string, format: uuid }
+                action: { type: string, enum: ['MANUAL APPROVED', 'REJECTED TO VENDOR'] }
+                note: { type: string }
+      responses:
+        '200':
+          description: Updated audit log (or escalated to PENDING_CFO_APPROVAL for > Rp50M by FINANCE_MANAGER)
+        '403':
+          description: RBAC role denied or Segregation of Duties (SOD_VIOLATION)
+  /api/vendors:
+    get:
+      summary: List registered Vendor Master records (bank accounts & NPWP)
+      responses:
+        '200':
+          description: Vendor Master list
+    post:
+      summary: Upsert a Vendor Master record (FINANCE_MANAGER or CFO only)
+      security:
+        - BearerAuth: []
+      responses:
+        '201':
+          description: Saved vendor record
+        '403':
+          description: Forbidden for AUDITOR or AP_CLERK
+  /api/pos:
+    post:
+      summary: Create a Purchase Order (FINANCE_MANAGER or CFO only)
+      security:
+        - BearerAuth: []
+      responses:
+        '201':
+          description: Created Purchase Order
+    patch:
+      summary: Update Warehouse Goods Receipt Note (GRN) quantities on a PO
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Updated Purchase Order
+  /api/audit-events:
+    get:
+      summary: Read immutable append-only audit event history
+      parameters:
+        - name: audit_log_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Chronological list of immutable audit events
+  /api/reset:
+    post:
+      summary: Reset sandbox ledger to default seed data (FINANCE_MANAGER or CFO only)
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Sandbox ledger reset confirmation
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer

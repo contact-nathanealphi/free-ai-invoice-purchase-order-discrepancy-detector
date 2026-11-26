@@ -1,10 +1,11 @@
 {
   "name": "invoice-po-discrepancy-detector",
-  "version": "3.0.0",
+  "version": "6.0.0",
   "description": "Automated Invoice vs. PO Discrepancy Detector with 3-Way Match, Gemini AI Extraction, and Executive AP Command Center",
   "main": "src/auditEngine.js",
   "scripts": {
     "test": "node --test",
+    "test:e2e": "node tests/e2e/dashboard.spec.js",
     "dev": "node src/localServer.js",
     "build": "npm run build:css",
     "build:css": "tailwindcss -i ./src/input.css -o ./public/styles.css --minify",

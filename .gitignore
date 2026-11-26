@@ -39,3 +39,8 @@ Thumbs.db
 
 # Playwright QA Screenshots
 qa-screenshots/
+
+# Mutable local runtime ledger & generated benchmark outputs
+data/local_ledger.json
+reports/benchmark_summary.json
+reports/stress_test_v2.json

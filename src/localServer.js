@@ -11,6 +11,7 @@ const resetHandler = require('../api/reset');
 const posHandler = require('../api/pos');
 const vendorsHandler = require('../api/vendors');
 const auditEventsHandler = require('../api/audit-events');
+const healthHandler = require('../api/health');
 const extractPoHandler = require('../api/extract-po');
 
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
@@ -32,6 +33,7 @@ const API_ROUTES = {
   '/api/pos': posHandler,
   '/api/vendors': vendorsHandler,
   '/api/audit-events': auditEventsHandler,
+  '/api/health': healthHandler,
   '/api/extract-po': extractPoHandler,
 };
 
