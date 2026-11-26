@@ -7,8 +7,11 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2318181B'/><text x='50%' y='55%' dominant-baseline='middle' text-anchor='middle' fill='white' font-size='14' font-family='sans-serif' font-weight='bold'>AI</text></svg>" />
   <link rel="manifest" href="/manifest.json" />
   <meta name="theme-color" content="#18181B" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" />
   <link rel="stylesheet" href="/styles.css" />
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js" crossorigin="anonymous"></script>
 </head>
 <body class="bg-[#FAFAFA] text-zinc-900 min-h-screen flex overflow-x-hidden">
   <!-- Left Sidebar (240px) -->
@@ -115,23 +118,84 @@
         <div class="h-14 px-4 border-b border-zinc-200 flex items-center justify-between">
           <div class="flex items-center gap-2.5 min-w-0">
             <div class="w-7 h-7 shrink-0 rounded-lg bg-zinc-900 text-white flex items-center justify-center text-[11px] font-bold">AI</div>
-            <div class="text-xs font-semibold text-zinc-900 leading-tight truncate">AI Invoice &amp; PO Detector</div>
+            <div class="text-[11px] font-semibold text-zinc-900 leading-tight truncate">AI Invoice &amp; PO Detector</div>
           </div>
-          <button id="closeMobileNavBtn" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-900 cursor-pointer">
+          <button id="closeMobileNavBtn" aria-label="Close Navigation" class="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-900 cursor-pointer">
             <i data-lucide="x" class="w-4 h-4"></i>
           </button>
         </div>
         <nav class="p-3 space-y-1 text-xs font-medium">
-          <button data-nav="overview" class="nav-item mobile-nav-item w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-zinc-700 hover:bg-zinc-100 cursor-pointer">Overview &amp; Intake</button>
-          <button data-nav="ledger" class="nav-item mobile-nav-item w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-zinc-700 hover:bg-zinc-100 cursor-pointer">Audit Ledger</button>
-          <button data-nav="pos" class="nav-item mobile-nav-item w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-zinc-700 hover:bg-zinc-100 cursor-pointer">Purchase Orders &amp; GRN</button>
-          <button data-nav="policies" class="nav-item mobile-nav-item w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-zinc-700 hover:bg-zinc-100 cursor-pointer">Audit Policies</button>
-          <button data-nav="cfo" class="nav-item mobile-nav-item w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-zinc-700 hover:bg-zinc-100 cursor-pointer">CFO &amp; Vendor Insights</button>
-          <button data-nav="api" class="nav-item mobile-nav-item w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-zinc-700 hover:bg-zinc-100 cursor-pointer">API &amp; Webhooks</button>
+          <button data-nav="overview" class="nav-item mobile-nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg bg-zinc-100 text-zinc-900 font-semibold cursor-pointer">
+            <span class="flex items-center gap-2.5">
+              <i data-lucide="layout-dashboard" class="w-4 h-4 text-zinc-700"></i>
+              Overview &amp; Intake
+            </span>
+          </button>
+          <button data-nav="ledger" class="nav-item mobile-nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 cursor-pointer">
+            <span class="flex items-center gap-2.5">
+              <i data-lucide="file-spreadsheet" class="w-4 h-4 text-zinc-500"></i>
+              Audit Ledger
+            </span>
+            <span id="mobileReviewBadgeCount" class="hidden px-1.5 py-0.5 rounded-md text-[10px] font-mono font-semibold bg-rose-50 text-rose-700 border border-rose-200">0</span>
+          </button>
+          <button data-nav="pos" class="nav-item mobile-nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 cursor-pointer">
+            <span class="flex items-center gap-2.5">
+              <i data-lucide="package-check" class="w-4 h-4 text-zinc-500"></i>
+              Purchase Orders &amp; GRN
+            </span>
+          </button>
+          <button data-nav="policies" class="nav-item mobile-nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 cursor-pointer">
+            <span class="flex items-center gap-2.5">
+              <i data-lucide="sliders-horizontal" class="w-4 h-4 text-zinc-500"></i>
+              Audit Policies
+            </span>
+          </button>
+          <button data-nav="cfo" class="nav-item mobile-nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 cursor-pointer">
+            <span class="flex items-center gap-2.5">
+              <i data-lucide="shield-check" class="w-4 h-4 text-zinc-500"></i>
+              CFO &amp; Vendor Insights
+            </span>
+          </button>
+          <button data-nav="api" class="nav-item mobile-nav-item w-full flex items-center justify-between px-3 py-2 rounded-lg text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 cursor-pointer">
+            <span class="flex items-center gap-2.5">
+              <i data-lucide="terminal" class="w-4 h-4 text-zinc-500"></i>
+              API &amp; Webhooks
+            </span>
+          </button>
         </nav>
       </div>
-      <div class="p-3 border-t border-zinc-200 space-y-2 text-xs">
-        <a href="/playground.html" class="block px-3 py-2 rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-50 font-medium">Audit Sandbox &amp; Sample Studio →</a>
+      <div class="p-3 border-t border-zinc-200 space-y-2">
+        <button id="mobileOpenByokBtn" class="w-full px-3 py-2 rounded-lg bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 flex items-center justify-between text-xs text-zinc-800 transition cursor-pointer">
+          <span class="flex items-center gap-2 truncate">
+            <span id="mobileAiModeDot" class="w-2 h-2 rounded-full bg-zinc-500 shrink-0"></span>
+            <span id="mobileAiModeText" class="font-medium truncate">Server Demo (2/day)</span>
+          </span>
+          <span class="text-[10px] font-mono text-zinc-500">BYOK</span>
+        </button>
+
+        <div class="grid grid-cols-3 gap-1 text-[10px]">
+          <button id="mobileExportWsBtn" title="Export Workspace (.json)" class="px-1.5 py-1.5 rounded border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700 font-medium cursor-pointer truncate">Export</button>
+          <label title="Import Workspace (.json)" class="px-1.5 py-1.5 rounded border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700 font-medium cursor-pointer text-center truncate">
+            Import
+            <input id="mobileImportWsInput" type="file" accept="application/json" class="hidden" />
+          </label>
+          <button id="mobileResetWsBtn" title="Reset to Default Demo" class="px-1.5 py-1.5 rounded border border-zinc-200 bg-white hover:bg-rose-50 text-zinc-700 hover:text-rose-700 font-medium cursor-pointer truncate">Reset</button>
+        </div>
+        <div class="grid grid-cols-2 gap-1 text-[10px]">
+          <button id="mobileExportVaultBtn" title="Export AES-256 Encrypted Vault (.auditvault)" class="px-1.5 py-1.5 rounded border border-zinc-200 bg-zinc-900 hover:bg-zinc-800 text-white font-medium cursor-pointer truncate">Lock (.auditvault)</button>
+          <label title="Import Encrypted Vault (.auditvault / .exacta / .parivex)" class="px-1.5 py-1.5 rounded border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-medium cursor-pointer text-center truncate">
+            Unlock Vault
+            <input id="mobileImportVaultInput" type="file" accept=".auditvault,.exacta,.parivex,application/json" class="hidden" />
+          </label>
+        </div>
+
+        <a href="/playground.html" class="flex items-center justify-between px-3 py-2 rounded-lg text-xs text-zinc-500 hover:text-zinc-900 hover:bg-zinc-50 transition">
+          <span class="flex items-center gap-2">
+            <i data-lucide="flask-conical" class="w-3.5 h-3.5"></i>
+            Audit Sandbox &amp; Sample Studio
+          </span>
+          <span>→</span>
+        </a>
       </div>
     </div>
   </div>

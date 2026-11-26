@@ -8,6 +8,7 @@
     "dev": "node src/localServer.js",
     "build": "npm run build:css",
     "build:css": "tailwindcss -i ./src/input.css -o ./public/styles.css --minify",
+    "build:n8n": "node scripts/buildN8n.js",
     "benchmark:mock": "node src/runE2EBenchmark.js --mock",
     "benchmark:live": "node src/runE2EBenchmark.js --live"
   },

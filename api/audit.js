@@ -20,6 +20,8 @@ const {
   parseJsonBody,
   getClientIp,
   checkDailyDemoQuota,
+  isAdminRequest,
+  resolveActorContext,
 } = require('../src/apiHelpers');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -36,9 +38,13 @@ module.exports = async function handler(req, res) {
 
     // Stateless workspace support: prefer client-sent purchaseOrders/auditLogs if provided
     const hasClientWorkspace = Array.isArray(body.purchaseOrders);
-    const [purchaseOrders, existingLogs] = hasClientWorkspace
-      ? [body.purchaseOrders, Array.isArray(body.auditLogs) ? body.auditLogs : []]
-      : await Promise.all([repo.getPurchaseOrders(), repo.getAuditLogs()]);
+    const [purchaseOrders, existingLogs, vendorMaster] = hasClientWorkspace
+      ? [
+          body.purchaseOrders,
+          Array.isArray(body.auditLogs) ? body.auditLogs : [],
+          Array.isArray(body.vendorMaster) ? body.vendorMaster : [],
+        ]
+      : await Promise.all([repo.getPurchaseOrders(), repo.getAuditLogs(), repo.getVendors()]);
 
     let fileName = body.fileName || 'uploaded_invoice.pdf';
     let cleanBase64 = '';
@@ -55,6 +61,17 @@ module.exports = async function handler(req, res) {
     };
 
     if (body.preExtractedInvoice && typeof body.preExtractedInvoice === 'object') {
+      if (!hasClientWorkspace && !isAdminRequest(req)) {
+        return sendJson(
+          res,
+          400,
+          {
+            ok: false,
+            error: 'preExtractedInvoice is only permitted in stateless client-workspace mode or with admin authorization.',
+          },
+          req
+        );
+      }
       // Local Offline AI (Ollama / LM Studio) extracted directly in browser
       extractedInvoice = { ...body.preExtractedInvoice };
       normalizedMime = body.mimeType || 'application/pdf';
@@ -179,16 +196,20 @@ module.exports = async function handler(req, res) {
     const fileHash = crypto.createHash('sha256').update(hashInput).digest('hex');
     extractedInvoice.file_hash = fileHash;
 
-    const resolvedPolicy = resolvePolicyConfig({
-      ...(body.policyConfig || {}),
-      itemAliases: Array.isArray(body.itemAliases)
-        ? body.itemAliases
-        : body.policyConfig?.itemAliases || [],
-    });
+    const allowClientPolicy = hasClientWorkspace || isAdminRequest(req);
+    const resolvedPolicy = allowClientPolicy
+      ? resolvePolicyConfig({
+          ...(body.policyConfig || {}),
+          itemAliases: Array.isArray(body.itemAliases)
+            ? body.itemAliases
+            : body.policyConfig?.itemAliases || [],
+        })
+      : resolvePolicyConfig({});
     const flatPOs = flattenPurchaseOrdersForAudit(purchaseOrders);
     const auditResult = auditInvoice(extractedInvoice, flatPOs, existingLogs, {
       token_usage: extractionMeta.token_usage,
       policyConfig: resolvedPolicy,
+      vendorMaster,
     });
 
     const canonicalPo = normalizePoNumber(auditResult.po_number);
@@ -202,9 +223,11 @@ module.exports = async function handler(req, res) {
 
     const costIdr = extractionMeta.cost_idr !== null ? extractionMeta.cost_idr : auditResult.estimated_cost_idr;
 
+    const actor = resolveActorContext(req);
     const logPayload = {
       id: crypto.randomUUID(),
       created_at: new Date().toISOString(),
+      created_by: actor.actor_id,
       file_name: fileName,
       file_hash: fileHash,
       mime_type: normalizedMime,
@@ -238,6 +261,18 @@ module.exports = async function handler(req, res) {
 
     // Only persist to server repo when client is NOT managing its own stateless workspace
     const savedLog = hasClientWorkspace ? logPayload : await repo.insertAuditLog(logPayload);
+    if (!hasClientWorkspace) {
+      await repo.appendAuditEvent({
+        audit_log_id: savedLog.id,
+        actor_id: actor.actor_id,
+        actor_role: actor.actor_role,
+        action: 'CREATED',
+        previous_status: null,
+        next_status: savedLog.audit_status,
+        reason: auditResult.discrepancy_reason || 'Initial automated audit completed.',
+        ip_address: getClientIp(req),
+      });
+    }
 
     if (
       !hasClientWorkspace &&
@@ -272,6 +307,6 @@ module.exports = async function handler(req, res) {
       extracted_markdown: extractionMeta.extracted_markdown,
     });
   } catch (err) {
-    return sendJson(res, 500, { ok: false, error: err.message });
+    return sendJson(res, err.statusCode || 500, { ok: false, error: err.message }, req);
   }
 };

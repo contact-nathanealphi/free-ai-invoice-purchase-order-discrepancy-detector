@@ -1,7 +1,11 @@
 'use strict';
 
-const { createRepository } = require('../src/dbRepository');
-const { sendJson, handleCorsPreflight } = require('../src/apiHelpers');
+const {
+  createRepository,
+  getDefaultSeedPurchaseOrders,
+  getDefaultSeedAuditLogs,
+} = require('../src/dbRepository');
+const { sendJson, handleCorsPreflight, requireAdminAuth } = require('../src/apiHelpers');
 
 const USD_FALLBACK_RATE = 16000;
 
@@ -38,24 +42,70 @@ function computeKpis(auditLogs = []) {
 module.exports = async function handler(req, res) {
   if (handleCorsPreflight(req, res)) return;
   if (req.method !== 'GET') {
-    return sendJson(res, 405, { ok: false, error: 'Method Not Allowed. Gunakan GET.' });
+    return sendJson(res, 405, { ok: false, error: 'Method Not Allowed. Gunakan GET.' }, req);
   }
 
   try {
+    const parsedUrl = new URL(req.url || '/', 'http://localhost');
+    const isSeedOnly = parsedUrl.searchParams.get('seed') === '1';
+
+    if (isSeedOnly) {
+      const seedPOs = getDefaultSeedPurchaseOrders();
+      const seedLogs = getDefaultSeedAuditLogs();
+      return sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          mode: 'seed',
+          kpi: computeKpis(seedLogs),
+          purchase_orders: seedPOs,
+          audit_logs: seedLogs,
+        },
+        req
+      );
+    }
+
+    if (process.env.ADMIN_API_TOKEN && !requireAdminAuth(req, res)) {
+      return;
+    }
+
     const repo = createRepository();
+    if (process.env.VERCEL === '1' && repo.mode === 'supabase') {
+      const seedPOs = getDefaultSeedPurchaseOrders();
+      const seedLogs = getDefaultSeedAuditLogs();
+      return sendJson(
+        res,
+        200,
+        {
+          ok: true,
+          mode: 'seed',
+          kpi: computeKpis(seedLogs),
+          purchase_orders: seedPOs,
+          audit_logs: seedLogs,
+        },
+        req
+      );
+    }
+
     const [purchaseOrders, auditLogs] = await Promise.all([
       repo.getPurchaseOrders(),
       repo.getAuditLogs(),
     ]);
 
-    return sendJson(res, 200, {
-      ok: true,
-      mode: repo.mode,
-      kpi: computeKpis(auditLogs),
-      purchase_orders: purchaseOrders,
-      audit_logs: auditLogs,
-    });
+    return sendJson(
+      res,
+      200,
+      {
+        ok: true,
+        mode: repo.mode,
+        kpi: computeKpis(auditLogs),
+        purchase_orders: purchaseOrders,
+        audit_logs: auditLogs,
+      },
+      req
+    );
   } catch (err) {
-    return sendJson(res, 500, { ok: false, error: err.message });
+    return sendJson(res, 500, { ok: false, error: err.message }, req);
   }
 };

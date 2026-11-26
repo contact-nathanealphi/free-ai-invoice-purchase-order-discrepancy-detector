@@ -75,7 +75,17 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeCsvCell(val) {
+  const raw = val ?? '';
+  let str = String(raw);
+  if (typeof raw === 'string' && /^[\s]*[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  return `"${str.replace(/"/g, '""')}"`;
 }
 
 function statusBadgeHtml(status) {
@@ -137,18 +147,23 @@ function switchView(viewName) {
 
 function renderByokBadge() {
   const cfg = window.ExactaStore.getByokConfig();
-  const textEl = document.getElementById('aiModeText');
-  const dotEl = document.getElementById('aiModeDot');
+  let label = 'Server Demo (2/day)';
+  let dotClass = 'w-2 h-2 rounded-full bg-zinc-500 shrink-0';
   if (cfg.provider === 'local_ollama') {
-    textEl.textContent = `Local AI (${cfg.localModel || 'ollama'})`;
-    dotEl.className = 'w-2 h-2 rounded-full bg-sky-500 shrink-0';
+    label = `Local AI (${cfg.localModel || 'ollama'})`;
+    dotClass = 'w-2 h-2 rounded-full bg-sky-500 shrink-0';
   } else if (cfg.apiKey) {
-    textEl.textContent = `BYOK: ${cfg.provider.toUpperCase()} (${cfg.model})`;
-    dotEl.className = 'w-2 h-2 rounded-full bg-emerald-500 shrink-0';
-  } else {
-    textEl.textContent = 'Server Demo (2/day)';
-    dotEl.className = 'w-2 h-2 rounded-full bg-zinc-500 shrink-0';
+    label = `BYOK: ${cfg.provider.toUpperCase()} (${cfg.model})`;
+    dotClass = 'w-2 h-2 rounded-full bg-emerald-500 shrink-0';
   }
+  ['aiModeText', 'mobileAiModeText'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = label;
+  });
+  ['aiModeDot', 'mobileAiModeDot'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.className = dotClass;
+  });
 }
 
 function renderAliasList() {
@@ -275,9 +290,12 @@ function renderWorkspace() {
     const s = String(l.audit_status || '').toUpperCase();
     return s.startsWith('HOLD') || s === 'HUMAN REVIEW';
   }).length;
-  const reviewBadge = document.getElementById('reviewBadgeCount');
-  reviewBadge.textContent = needsReviewCount;
-  reviewBadge.classList.toggle('hidden', needsReviewCount === 0);
+  ['reviewBadgeCount', 'mobileReviewBadgeCount'].forEach((id) => {
+    const badge = document.getElementById(id);
+    if (!badge) return;
+    badge.textContent = needsReviewCount;
+    badge.classList.toggle('hidden', needsReviewCount === 0);
+  });
 
   document.getElementById('poCountBadge').textContent = purchaseOrders.length;
 
@@ -782,10 +800,15 @@ async function openDiffModal(logId) {
       else previewEl.value = `Subject: ${pack.subject}\n\n${pack.emailBody}`;
       document.getElementById('mailtoDisputeLink').href = pack.mailtoUrl;
       document.getElementById('printDebitNoteBtn').onclick = () => {
-        const w = window.open('', '_blank', 'width=800,height=700');
+        const w = window.open('', '_blank', 'width=800,height=700,noopener');
         if (w) {
-          w.document.write(`<html><head><title>Debit Note</title></head><body>${pack.debitNoteHtml}<script>window.print();</script></body></html>`);
+          w.document.open();
+          w.document.write(
+            `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';"><title>Debit Note</title></head><body>${pack.debitNoteHtml}</body></html>`
+          );
           w.document.close();
+          w.focus();
+          w.print();
         }
       };
     };
@@ -826,14 +849,18 @@ function readFileAsDataUrl(file) {
 }
 
 /**
- * Lightweight zero-dependency client-side ZIP extractor (STORE + DEFLATE via DecompressionStream).
+ * Lightweight zero-dependency client-side ZIP extractor (STORE + DEFLATE via DecompressionStream)
+ * with decompressed byte caps against zip-bomb DoS.
  */
 async function extractFilesFromZip(zipFile) {
+  const MAX_ZIP_ENTRY_BYTES = 10 * 1024 * 1024; // 10 MB per extracted file
+  const MAX_ZIP_TOTAL_BYTES = 50 * 1024 * 1024; // 50 MB total across archive
   const buffer = await zipFile.arrayBuffer();
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
   const decoder = new TextDecoder('utf-8');
   const extracted = [];
+  let totalDecompressedBytes = 0;
 
   // Find End of Central Directory (PK\x05\x06)
   let eocdOffset = -1;
@@ -853,6 +880,7 @@ async function extractFilesFromZip(zipFile) {
     if (view.getUint32(ptr, true) !== 0x02014b50) break;
     const compressionMethod = view.getUint16(ptr + 10, true);
     const compressedSize = view.getUint32(ptr + 20, true);
+    const uncompressedSize = view.getUint32(ptr + 24, true);
     const nameLen = view.getUint16(ptr + 28, true);
     const extraLen = view.getUint16(ptr + 30, true);
     const commentLen = view.getUint16(ptr + 32, true);
@@ -865,19 +893,49 @@ async function extractFilesFromZip(zipFile) {
     const mime = ACCEPTED_MIME_BY_EXT[ext];
     if (!mime) continue;
 
-    if (view.getUint32(localHeaderOffset, true) !== 0x04034b50) continue;
+    if (uncompressedSize > MAX_ZIP_ENTRY_BYTES) {
+      throw new Error(`ZIP entry "${fileName}" exceeds 10MB uncompressed size limit.`);
+    }
+    if (localHeaderOffset + 30 > bytes.length || view.getUint32(localHeaderOffset, true) !== 0x04034b50) continue;
     const lhNameLen = view.getUint16(localHeaderOffset + 26, true);
     const lhExtraLen = view.getUint16(localHeaderOffset + 28, true);
     const dataStart = localHeaderOffset + 30 + lhNameLen + lhExtraLen;
+    if (dataStart + compressedSize > bytes.length) continue;
     const compressedSlice = bytes.subarray(dataStart, dataStart + compressedSize);
 
     let fileBytes;
     if (compressionMethod === 0) {
+      if (compressedSlice.byteLength > MAX_ZIP_ENTRY_BYTES) {
+        throw new Error(`ZIP entry "${fileName}" exceeds 10MB size limit.`);
+      }
+      if (totalDecompressedBytes + compressedSlice.byteLength > MAX_ZIP_TOTAL_BYTES) {
+        throw new Error('ZIP archive exceeds 50MB total uncompressed size limit.');
+      }
+      totalDecompressedBytes += compressedSlice.byteLength;
       fileBytes = compressedSlice;
     } else if (compressionMethod === 8 && typeof DecompressionStream !== 'undefined') {
       const ds = new DecompressionStream('deflate-raw');
       const stream = new Blob([compressedSlice]).stream().pipeThrough(ds);
-      fileBytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      const reader = stream.getReader();
+      const chunks = [];
+      let entryBytes = 0;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        entryBytes += value.byteLength;
+        if (entryBytes > MAX_ZIP_ENTRY_BYTES || totalDecompressedBytes + entryBytes > MAX_ZIP_TOTAL_BYTES) {
+          await reader.cancel();
+          throw new Error(`ZIP archive blocked by zip-bomb protection (>10MB file or >50MB total).`);
+        }
+        chunks.push(value);
+      }
+      totalDecompressedBytes += entryBytes;
+      fileBytes = new Uint8Array(entryBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        fileBytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
     } else {
       continue;
     }
@@ -1165,7 +1223,7 @@ function exportAuditLogsCsv() {
     return;
   }
   const headers = ['id', 'created_at', 'file_name', 'invoice_number', 'po_number', 'vendor_name', 'currency', 'grand_total', 'audit_status', 'cost_idr', 'latency_ms'];
-  const rows = logs.map((l) => headers.map((h) => `"${String(l[h] ?? '').replace(/"/g, '""')}"`).join(','));
+  const rows = logs.map((l) => headers.map((h) => safeCsvCell(l[h])).join(','));
   const csv = [headers.join(','), ...rows].join('\n');
   downloadTextFile(`exacta_audit_logs_${new Date().toISOString().slice(0, 10)}.csv`, csv, 'text/csv;charset=utf-8;');
 }
@@ -1513,6 +1571,31 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.querySelectorAll('.mobile-nav-item').forEach((btn) => {
     btn.addEventListener('click', closeMobileNav);
   });
+  [
+    ['mobileOpenByokBtn', 'openByokBtn'],
+    ['mobileExportWsBtn', 'exportWsBtn'],
+    ['mobileResetWsBtn', 'resetWsBtn'],
+    ['mobileExportVaultBtn', 'exportVaultBtn'],
+  ].forEach(([mobileId, desktopId]) => {
+    const el = document.getElementById(mobileId);
+    if (el) el.addEventListener('click', () => { closeMobileNav(); document.getElementById(desktopId).click(); });
+  });
+  [
+    ['mobileImportWsInput', 'importWsInput'],
+    ['mobileImportVaultInput', 'importVaultInput'],
+  ].forEach(([mobileId, desktopId]) => {
+    const el = document.getElementById(mobileId);
+    if (!el) return;
+    el.addEventListener('change', (e) => {
+      closeMobileNav();
+      const target = document.getElementById(desktopId);
+      const dt = new DataTransfer();
+      Array.from(e.target.files || []).forEach((f) => dt.items.add(f));
+      target.files = dt.files;
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+      e.target.value = '';
+    });
+  });
 
   const mobileActionsMenu = document.getElementById('mobileActionsMenu');
   document.getElementById('mobileActionsBtn').addEventListener('click', () => mobileActionsMenu.classList.toggle('hidden'));
@@ -1542,7 +1625,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const logs = (window.ExactaStore.getWorkspace().auditLogs || []).filter((l) => selectedLogIds.has(l.id));
     if (!logs.length) return;
     const headers = ['id', 'created_at', 'file_name', 'invoice_number', 'po_number', 'vendor_name', 'currency', 'grand_total', 'audit_status'];
-    const rows = logs.map((l) => headers.map((h) => `"${String(l[h] ?? '').replace(/"/g, '""')}"`).join(','));
+    const rows = logs.map((l) => headers.map((h) => safeCsvCell(l[h])).join(','));
     downloadTextFile(`invoice_po_selected_${new Date().toISOString().slice(0, 10)}.csv`, [headers.join(','), ...rows].join('\n'), 'text/csv;charset=utf-8;');
   });
 
@@ -1617,8 +1700,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       e.preventDefault();
       openCommandPalette();
     } else if (e.key === 'Escape') {
-      document.getElementById('commandPaletteModal').classList.add('hidden');
-      document.getElementById('vaultPasswordModal').classList.add('hidden');
+      [
+        'commandPaletteModal',
+        'vaultPasswordModal',
+        'diffModal',
+        'byokModal',
+        'uploadPoModal',
+        'newPoModal',
+        'grnModal',
+        'bulkCsvModal',
+        'markPaidModal',
+        'mobileNavDrawer',
+      ].forEach((id) => document.getElementById(id)?.classList.add('hidden'));
     } else if (!document.getElementById('diffModal').classList.contains('hidden')) {
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -1783,11 +1876,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Modals
+  // Modals (close button + backdrop click)
   document.querySelectorAll('[data-close-modal]').forEach((btn) => {
     btn.addEventListener('click', () => {
       document.getElementById(btn.dataset.closeModal).classList.add('hidden');
     });
+  });
+  ['diffModal', 'byokModal', 'uploadPoModal', 'newPoModal', 'grnModal', 'bulkCsvModal', 'markPaidModal', 'vaultPasswordModal'].forEach((id) => {
+    const modal = document.getElementById(id);
+    if (modal) {
+      modal.addEventListener('click', (e) => {
+        if (e.target.id === id) modal.classList.add('hidden');
+      });
+    }
   });
 
   document.getElementById('newPoBtn').addEventListener('click', () => {

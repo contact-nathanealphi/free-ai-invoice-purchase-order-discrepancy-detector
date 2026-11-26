@@ -4,6 +4,7 @@ const CONFIDENCE_THRESHOLD = 0.85;
 const PPN_RATE = 0.11;
 const PPH23_RATE = 0.02;
 const ROUNDING_TOLERANCE_IDR = 100;
+const MAX_CEILING_VARIANCE_PCT = 5;
 
 const DEFAULT_POLICY_CONFIG = {
   priceTolerancePct: 0,
@@ -116,6 +117,26 @@ function normalizeItemName(name) {
     .replace(/\s+/g, ' ');
 }
 
+function normalizeAccountNumber(acc) {
+  return toTrimmedString(acc)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+function normalizeTaxId(npwp) {
+  return toTrimmedString(npwp).replace(/\D/g, '');
+}
+
+function findMatchingVendor(vendorName, vendorMasterList = []) {
+  const target = normalizeItemName(vendorName);
+  if (!target || !Array.isArray(vendorMasterList) || vendorMasterList.length === 0) {
+    return null;
+  }
+  return (
+    vendorMasterList.find((v) => v && normalizeItemName(v.vendor_name) === target) || null
+  );
+}
+
 function formatIDR(amount) {
   const sign = amount < 0 ? '-' : '';
   return `${sign}Rp${Math.abs(Math.round(amount)).toLocaleString('id-ID')}`;
@@ -153,11 +174,42 @@ function buildAuditResult(payload) {
     confidence_score: payload.confidence_score,
     audit_status: payload.audit_status,
     discrepancy_reason: payload.discrepancy_reason,
+    policy_override_note: payload.policy_override_note || null,
     requires_human_review: payload.requires_human_review,
     checked_rules: payload.checked_rules,
     estimated_cost_usd: payload.estimated_cost_usd,
     estimated_cost_idr: payload.estimated_cost_idr,
   };
+}
+
+function tokenizeItemName(name) {
+  return normalizeItemName(name)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function isSafeItemMatch(target, poName) {
+  if (!target || !poName) return false;
+  const shorterStr = target.length <= poName.length ? target : poName;
+  if (shorterStr.length < 6) return false;
+
+  const targetTokens = tokenizeItemName(target);
+  const poTokens = tokenizeItemName(poName);
+  if (!targetTokens.length || !poTokens.length) return false;
+
+  const shorterTokens = targetTokens.length <= poTokens.length ? targetTokens : poTokens;
+  const longerSet = new Set(targetTokens.length <= poTokens.length ? poTokens : targetTokens);
+  if (!shorterTokens.every((t) => longerSet.has(t))) {
+    return false;
+  }
+
+  const ratio = shorterTokens.length / Math.max(targetTokens.length, poTokens.length);
+  if (ratio >= 0.6) {
+    return true;
+  }
+  return poTokens.length >= 3 && target.startsWith(poName);
 }
 
 function findMatchingPoRow(lineItemName, poRows, itemAliases = []) {
@@ -180,13 +232,55 @@ function findMatchingPoRow(lineItemName, poRows, itemAliases = []) {
     }
   }
 
-  // Allow minor suffix annotations like "(Partial 6/10)" when PO item name is clearly contained
+  // Allow safe token-bounded matches (e.g. minor suffix "(Partial 6/10)") without short-word false matches
   return (
-    poRows.find((row) => {
-      const poName = normalizeItemName(row.item_name);
-      return poName && (target.includes(poName) || poName.includes(target));
-    }) || null
+    poRows.find((row) => isSafeItemMatch(target, normalizeItemName(row.item_name))) || null
   );
+}
+
+function computePriorBilledQty(canonicalPoNumber, poItemName, auditLogs, itemAliases) {
+  if (!canonicalPoNumber || !Array.isArray(auditLogs) || auditLogs.length === 0) {
+    return 0;
+  }
+  const approvedStatuses = new Set(['APPROVED', 'APPROVED - PARTIAL', 'MANUAL APPROVED']);
+  const targetRow = [{ item_name: poItemName }];
+  let totalPrior = 0;
+
+  for (const log of auditLogs) {
+    if (!log || normalizePoNumber(log.po_number) !== canonicalPoNumber) continue;
+    const status = String(log.audit_status || '').trim().toUpperCase();
+    if (!approvedStatuses.has(status)) continue;
+
+    const ext = log.extraction_data && typeof log.extraction_data === 'object' ? log.extraction_data : {};
+    const lines = Array.isArray(ext.line_items) && ext.line_items.length > 0
+      ? ext.line_items
+      : Number.isFinite(toFiniteNumber(ext.qty ?? log.qty))
+        ? [{ item_name: ext.item_name || poItemName, qty: toFiniteNumber(ext.qty ?? log.qty) }]
+        : [];
+
+    for (const ln of lines) {
+      const lnQty = toFiniteNumber(ln?.qty);
+      if (!Number.isFinite(lnQty) || lnQty <= 0) continue;
+      if (findMatchingPoRow(ln?.item_name || '', targetRow, itemAliases)) {
+        totalPrior += lnQty;
+      }
+    }
+  }
+  return totalPrior;
+}
+
+function canAutoApproveCeiling({ policy, invoicedTotal, poTotal, hasOverQty, maxDeviationPct }) {
+  if (!(policy.autoApproveCeiling > 0 && invoicedTotal > 0 && invoicedTotal <= policy.autoApproveCeiling)) {
+    return false;
+  }
+  if (hasOverQty) {
+    return false;
+  }
+  if (maxDeviationPct > MAX_CEILING_VARIANCE_PCT) {
+    return false;
+  }
+  const allowedTotalDiff = Math.max(ROUNDING_TOLERANCE_IDR, Math.abs(poTotal) * (MAX_CEILING_VARIANCE_PCT / 100));
+  return Math.abs(invoicedTotal - poTotal) <= allowedTotalDiff;
 }
 
 /**
@@ -364,8 +458,55 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
     }
   }
 
+  // Gate 6: Vendor Master Anti-BEC Bank Account & NPWP Fraud Guard (hard block; never auto-approved)
+  const vendorMaster = Array.isArray(options.vendorMaster) ? options.vendorMaster : [];
+  if (vendorMaster.length > 0) {
+    checkedRules.push('GATE_6_VENDOR_BANK_GUARD');
+    const lookupName = vendorName || toTrimmedString(matchedPORows[0].vendor_name);
+    const matchedVendor = findMatchingVendor(lookupName, vendorMaster);
+    if (matchedVendor) {
+      const vendorStatus = toTrimmedString(matchedVendor.status).toUpperCase() || 'ACTIVE';
+      if (vendorStatus !== 'ACTIVE') {
+        return buildAuditResult({
+          ...basePayload,
+          audit_status: 'HOLD - VENDOR BLOCKED',
+          discrepancy_reason: `Vendor "${matchedVendor.vendor_name}" berstatus "${vendorStatus}" di Vendor Master. Pembayaran diblokir.`,
+          requires_human_review: true,
+        });
+      }
+
+      const invoiceAccount = normalizeAccountNumber(invoice.bank_account_number);
+      const registeredAccount = normalizeAccountNumber(matchedVendor.bank_account_number);
+      if (invoiceAccount && registeredAccount && invoiceAccount !== registeredAccount) {
+        const invBank = toTrimmedString(invoice.bank_name) || 'Unknown Bank';
+        const regBank = toTrimmedString(matchedVendor.bank_name) || 'Registered Bank';
+        return buildAuditResult({
+          ...basePayload,
+          audit_status: 'HOLD - BANK ACCOUNT MISMATCH',
+          discrepancy_reason:
+            `Anti-BEC Fraud Guard: rekening transfer pada faktur (${invBank} ${toTrimmedString(invoice.bank_account_number)}) ` +
+            `tidak cocok dengan Vendor Master (${regBank} ${toTrimmedString(matchedVendor.bank_account_number)}).`,
+          requires_human_review: true,
+        });
+      }
+
+      const invoiceNpwp = normalizeTaxId(invoice.vendor_npwp);
+      const registeredNpwp = normalizeTaxId(matchedVendor.npwp);
+      if (invoiceNpwp && registeredNpwp && invoiceNpwp !== registeredNpwp) {
+        return buildAuditResult({
+          ...basePayload,
+          audit_status: 'HUMAN REVIEW',
+          discrepancy_reason:
+            `NPWP vendor pada faktur (${toTrimmedString(invoice.vendor_npwp)}) berbeda dengan Vendor Master (${toTrimmedString(matchedVendor.npwp)}).`,
+          requires_human_review: true,
+        });
+      }
+    }
+  }
+
   // Normalize line items (v2 line_items array OR v1 flat qty/unit_price)
   const hasLineItemsArray = Array.isArray(invoice.line_items) && invoice.line_items.length > 0;
+  const hasExplicitSingleItemName = !hasLineItemsArray && Boolean(toTrimmedString(invoice.item_name));
   let normalizedLines = [];
 
   if (hasLineItemsArray) {
@@ -377,6 +518,14 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
           ...basePayload,
           audit_status: 'HUMAN REVIEW',
           discrepancy_reason: 'Baris line_items memiliki qty atau unit_price yang kosong/tidak valid.',
+          requires_human_review: true,
+        });
+      }
+      if (lQty <= 0 || lPrice < 0) {
+        return buildAuditResult({
+          ...basePayload,
+          audit_status: 'HOLD - PRICE VARIANCE',
+          discrepancy_reason: `Baris "${toTrimmedString(item?.item_name) || 'item'}" memiliki qty (${lQty}) <= 0 atau unit_price (${lPrice}) negatif.`,
           requires_human_review: true,
         });
       }
@@ -397,6 +546,14 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
         requires_human_review: true,
       });
     }
+    if (invoicedTotal < 0) {
+      return buildAuditResult({
+        ...basePayload,
+        audit_status: 'HOLD - PRICE VARIANCE',
+        discrepancy_reason: `Grand total invoice tidak boleh negatif (${formatIDR(invoicedTotal)}).`,
+        requires_human_review: true,
+      });
+    }
   } else {
     const invoicedQty = toFiniteNumber(invoice.qty);
     const invoicedUnitPrice = toFiniteNumber(invoice.unit_price ?? invoice.billed_unit_price);
@@ -405,6 +562,14 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
         ...basePayload,
         audit_status: 'HUMAN REVIEW',
         discrepancy_reason: 'Field numerik invoice (qty, unit_price, atau grand_total) kosong atau tidak valid.',
+        requires_human_review: true,
+      });
+    }
+    if (invoicedQty <= 0 || invoicedUnitPrice < 0 || invoicedTotal < 0) {
+      return buildAuditResult({
+        ...basePayload,
+        audit_status: 'HOLD - PRICE VARIANCE',
+        discrepancy_reason: `Field numerik invoice tidak valid: qty (${invoicedQty}) <= 0 atau nominal negatif.`,
         requires_human_review: true,
       });
     }
@@ -418,15 +583,17 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
     ];
   }
 
-  // Gate 4: Deterministic Multi-Tax Engine (Dynamic PPN% & PPh% for SERVICE)
+  // Gate 4: Deterministic Multi-Tax Engine (Dynamic PPN% & PPh% for SERVICE + printed subtotal check)
   checkedRules.push('GATE_4_DETERMINISTIC_MATH_TAX');
   const ppnRate = policy.ppnRatePct / 100;
   const pphRate = policy.pphRatePct / 100;
   const expectedSubtotal = normalizedLines.reduce((sum, line) => sum + line.qty * line.unit_price, 0);
+  const invoicedSubtotal = toFiniteNumber(invoice.subtotal);
   const expectedPpn = Math.round(expectedSubtotal * ppnRate);
   const expectedPph23 = poType === 'SERVICE' ? Math.round(expectedSubtotal * pphRate) : 0;
   const expectedTotal = expectedSubtotal + expectedPpn - expectedPph23;
 
+  const subtotalDiff = Number.isFinite(invoicedSubtotal) ? invoicedSubtotal - expectedSubtotal : 0;
   const ppnDiff = Number.isFinite(invoicedPpn) ? invoicedPpn - expectedPpn : 0;
   const pph23Diff =
     poType === 'SERVICE' || Number.isFinite(invoicedPph23Raw)
@@ -435,19 +602,25 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
   const totalDiff = invoicedTotal - expectedTotal;
 
   if (
+    (Number.isFinite(invoicedSubtotal) && Math.abs(subtotalDiff) > ROUNDING_TOLERANCE_IDR) ||
     (Number.isFinite(invoicedPpn) && Math.abs(ppnDiff) > ROUNDING_TOLERANCE_IDR) ||
     Math.abs(pph23Diff) > ROUNDING_TOLERANCE_IDR ||
     Math.abs(totalDiff) > ROUNDING_TOLERANCE_IDR
   ) {
-    const nominalDiff = Math.abs(totalDiff) > ROUNDING_TOLERANCE_IDR ? totalDiff : ppnDiff || pph23Diff;
+    const nominalDiff =
+      Math.abs(totalDiff) > ROUNDING_TOLERANCE_IDR
+        ? totalDiff
+        : Math.abs(subtotalDiff) > ROUNDING_TOLERANCE_IDR
+          ? subtotalDiff
+          : ppnDiff || pph23Diff;
     return buildAuditResult({
       ...basePayload,
       variance: nominalDiff,
       audit_status: 'HOLD - TAX ERROR',
       discrepancy_reason:
-        `Kesalahan perhitungan pajak/Grand Total (${poType}) sebesar ${formatIDR(nominalDiff)} ` +
+        `Kesalahan perhitungan subtotal/pajak/Grand Total (${poType}) sebesar ${formatIDR(nominalDiff)} ` +
         `(tertagih ${formatIDR(invoicedTotal)}, seharusnya ${formatIDR(expectedTotal)}; ` +
-        `PPN 11% seharusnya ${formatIDR(expectedPpn)}, PPh 23 seharusnya ${formatIDR(expectedPph23)}).`,
+        `Subtotal seharusnya ${formatIDR(expectedSubtotal)}, PPN ${policy.ppnRatePct}% seharusnya ${formatIDR(expectedPpn)}, PPh 23 seharusnya ${formatIDR(expectedPph23)}).`,
       requires_human_review: true,
     });
   }
@@ -460,6 +633,9 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
   const mismatchReasons = [];
   const grnMismatchReasons = [];
   let isPartialDelivery = false;
+  let hasOverQty = false;
+  let maxDeviationPct = 0;
+  let policyOverrideNote = null;
 
   // Policy: Forbidden Fee Keywords check across all lines
   for (const line of normalizedLines) {
@@ -498,6 +674,8 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
 
   if (hasLineItemsArray || matchedPORows.length > 1) {
     const matchedPoKeys = new Set();
+    const cumulativeQtyByPoKey = new Map();
+    const poRowByKey = new Map();
 
     for (const line of normalizedLines) {
       const poRow = findMatchingPoRow(line.item_name, matchedPORows, policy.itemAliases);
@@ -506,25 +684,57 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
         continue;
       }
 
-      matchedPoKeys.add(normalizeItemName(poRow.item_name));
+      const poKey = normalizeItemName(poRow.item_name);
+      matchedPoKeys.add(poKey);
+      poRowByKey.set(poKey, poRow);
+      const nextCumulativeQty = (cumulativeQtyByPoKey.get(poKey) || 0) + line.qty;
+      cumulativeQtyByPoKey.set(poKey, nextCumulativeQty);
+
       const poQty = toFiniteNumber(poRow.qty);
       const poUnitPrice = toFiniteNumber(poRow.unit_price);
       const grnQty = toFiniteNumber(poRow.grn_received_qty);
+      const priorFromLogs = computePriorBilledQty(canonicalPoNumber, poRow.item_name, auditLogs, policy.itemAliases);
+      const rawRemaining = toFiniteNumber(poRow.remaining_qty);
+      const poCapacityLeft = Math.max(0, poQty - priorFromLogs);
+      const effectiveRemaining = Number.isFinite(rawRemaining)
+        ? Math.min(rawRemaining, poCapacityLeft)
+        : poCapacityLeft;
+      const alreadyBilled = Math.max(0, poQty - effectiveRemaining);
 
       if (!isWithinPriceTolerance(line.unit_price, poUnitPrice, policy.priceTolerancePct)) {
+        const devPct = poUnitPrice > 0 ? (Math.abs(line.unit_price - poUnitPrice) / poUnitPrice) * 100 : 100;
+        if (devPct > maxDeviationPct) maxDeviationPct = devPct;
         mismatchReasons.push(
           `${line.item_name}: harga satuan tertagih ${formatIDR(line.unit_price)} vs PO ${formatIDR(poUnitPrice)}`
         );
       }
-      if (Number.isFinite(grnQty) && line.qty > grnQty) {
-        grnMismatchReasons.push(
-          `${line.item_name}: qty tertagih ${line.qty} melebihi GRN gudang ${grnQty}`
-        );
-      } else if (line.qty > poQty) {
+      if (nextCumulativeQty > effectiveRemaining) {
+        hasOverQty = true;
         mismatchReasons.push(
-          `${line.item_name}: qty tertagih ${line.qty} melebihi PO ${poQty}`
+          effectiveRemaining < poQty
+            ? `${line.item_name}: akumulasi qty tertagih ${nextCumulativeQty} melebihi sisa PO ${effectiveRemaining} (total PO ${poQty})`
+            : `${line.item_name}: akumulasi qty tertagih ${nextCumulativeQty} melebihi PO ${poQty}`
         );
-      } else if (line.qty < poQty) {
+      } else if (Number.isFinite(grnQty) && (alreadyBilled + nextCumulativeQty) > grnQty) {
+        grnMismatchReasons.push(
+          alreadyBilled > 0
+            ? `${line.item_name}: akumulasi qty tertagih ${alreadyBilled + nextCumulativeQty} melebihi GRN gudang ${grnQty}`
+            : `${line.item_name}: akumulasi qty tertagih ${nextCumulativeQty} melebihi GRN gudang ${grnQty}`
+        );
+      }
+    }
+
+    for (const [poKey, totalBilledOnInv] of cumulativeQtyByPoKey.entries()) {
+      const poRow = poRowByKey.get(poKey);
+      const poQty = toFiniteNumber(poRow.qty);
+      const priorFromLogs = computePriorBilledQty(canonicalPoNumber, poRow.item_name, auditLogs, policy.itemAliases);
+      const rawRemaining = toFiniteNumber(poRow.remaining_qty);
+      const poCapacityLeft = Math.max(0, poQty - priorFromLogs);
+      const effectiveRemaining = Number.isFinite(rawRemaining)
+        ? Math.min(rawRemaining, poCapacityLeft)
+        : poCapacityLeft;
+      const alreadyBilled = Math.max(0, poQty - effectiveRemaining);
+      if (totalBilledOnInv < effectiveRemaining || (alreadyBilled + totalBilledOnInv) < poQty) {
         isPartialDelivery = true;
       }
     }
@@ -557,8 +767,9 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
     }
 
     if (mismatchReasons.length > 0) {
-      if (policy.autoApproveCeiling > 0 && invoicedTotal > 0 && invoicedTotal <= policy.autoApproveCeiling) {
+      if (canAutoApproveCeiling({ policy, invoicedTotal, poTotal, hasOverQty, maxDeviationPct })) {
         checkedRules.push('POLICY_AUTO_APPROVE_CEILING');
+        policyOverrideNote = `Auto-approved under policy ceiling (<=${MAX_CEILING_VARIANCE_PCT}% variance): ${mismatchReasons.join('; ')}.`;
       } else {
         return buildAuditResult({
           ...basePayload,
@@ -576,13 +787,37 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
     const grnQty = toFiniteNumber(poRow.grn_received_qty);
     const line = normalizedLines[0];
 
-    if (Number.isFinite(grnQty) && line.qty > grnQty) {
+    if (hasExplicitSingleItemName && !findMatchingPoRow(line.item_name, matchedPORows, policy.itemAliases)) {
+      return buildAuditResult({
+        ...basePayload,
+        variance: line.line_total,
+        audit_status: 'HOLD - UNORDERED ITEM',
+        discrepancy_reason: `Ditemukan item/biaya di luar PO "${canonicalPoNumber}": "${line.item_name}".`,
+        requires_human_review: true,
+      });
+    }
+
+    const priorFromLogs = computePriorBilledQty(canonicalPoNumber, poRow.item_name, auditLogs, policy.itemAliases);
+    const rawRemaining = toFiniteNumber(poRow.remaining_qty);
+    const poCapacityLeft = Math.max(0, poQty - priorFromLogs);
+    const effectiveRemaining = Number.isFinite(rawRemaining)
+      ? Math.min(rawRemaining, poCapacityLeft)
+      : poCapacityLeft;
+    const alreadyBilled = Math.max(0, poQty - effectiveRemaining);
+
+    const isOverQty = line.qty > effectiveRemaining;
+    const isUnderQty = line.qty < effectiveRemaining || (alreadyBilled + line.qty) < poQty;
+
+    if (!isOverQty && Number.isFinite(grnQty) && (alreadyBilled + line.qty) > grnQty) {
       checkedRules.push('GATE_5B_3WAY_GRN_MATCH');
       return buildAuditResult({
         ...basePayload,
         variance: poVariance,
         audit_status: 'HOLD - GRN MISMATCH',
-        discrepancy_reason: `3-Way Match gagal pada PO "${canonicalPoNumber}": qty tertagih ${line.qty} melebihi GRN gudang ${grnQty}.`,
+        discrepancy_reason:
+          alreadyBilled > 0
+            ? `3-Way Match gagal pada PO "${canonicalPoNumber}": akumulasi qty tertagih ${alreadyBilled + line.qty} melebihi GRN gudang ${grnQty}.`
+            : `3-Way Match gagal pada PO "${canonicalPoNumber}": qty tertagih ${line.qty} melebihi GRN gudang ${grnQty}.`,
         requires_human_review: true,
       });
     }
@@ -592,14 +827,19 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
       poUnitPrice,
       policy.priceTolerancePct
     );
-    const isOverQty = line.qty > poQty;
-    const isUnderQty = line.qty < poQty && line.qty > 0;
 
     if (hasUnitPriceMismatch || isOverQty) {
       if (isOverQty) {
-        mismatchReasons.push(`qty tertagih ${line.qty} vs PO ${poQty}`);
+        hasOverQty = true;
+        mismatchReasons.push(
+          effectiveRemaining < poQty
+            ? `qty tertagih ${line.qty} melebihi sisa PO ${effectiveRemaining} (total PO ${poQty})`
+            : `qty tertagih ${line.qty} vs PO ${poQty}`
+        );
       }
       if (hasUnitPriceMismatch) {
+        const devPct = poUnitPrice > 0 ? (Math.abs(line.unit_price - poUnitPrice) / poUnitPrice) * 100 : 100;
+        if (devPct > maxDeviationPct) maxDeviationPct = devPct;
         mismatchReasons.push(
           `harga satuan tertagih ${formatIDR(line.unit_price)} vs PO ${formatIDR(poUnitPrice)}`
         );
@@ -607,8 +847,9 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
       if (Math.abs(poVariance) > ROUNDING_TOLERANCE_IDR) {
         mismatchReasons.push(`selisih grand total ${formatIDR(poVariance)}`);
       }
-      if (policy.autoApproveCeiling > 0 && invoicedTotal > 0 && invoicedTotal <= policy.autoApproveCeiling) {
+      if (canAutoApproveCeiling({ policy, invoicedTotal, poTotal, hasOverQty, maxDeviationPct })) {
         checkedRules.push('POLICY_AUTO_APPROVE_CEILING');
+        policyOverrideNote = `Auto-approved under policy ceiling (<=${MAX_CEILING_VARIANCE_PCT}% variance): ${mismatchReasons.join('; ')}.`;
       } else {
         return buildAuditResult({
           ...basePayload,
@@ -628,8 +869,10 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
     if (isUnderQty) {
       isPartialDelivery = true;
     } else if (Math.abs(poVariance) > allowedTotalVariance) {
-      if (policy.autoApproveCeiling > 0 && invoicedTotal > 0 && invoicedTotal <= policy.autoApproveCeiling) {
+      const devPct = poTotal > 0 ? (Math.abs(poVariance) / poTotal) * 100 : 100;
+      if (canAutoApproveCeiling({ policy, invoicedTotal, poTotal, hasOverQty: false, maxDeviationPct: devPct })) {
         checkedRules.push('POLICY_AUTO_APPROVE_CEILING');
+        policyOverrideNote = `Auto-approved under policy ceiling (<=${MAX_CEILING_VARIANCE_PCT}% variance): selisih grand total ${formatIDR(poVariance)}.`;
       } else {
         return buildAuditResult({
           ...basePayload,
@@ -647,6 +890,7 @@ function auditInvoice(extractedInvoice, masterPOList = [], existingAuditLogs = [
     variance: poVariance,
     audit_status: isPartialDelivery ? 'APPROVED - PARTIAL' : 'APPROVED',
     discrepancy_reason: null,
+    policy_override_note: policyOverrideNote,
     requires_human_review: false,
   });
 }
@@ -660,6 +904,8 @@ module.exports = {
   DEFAULT_POLICY_CONFIG,
   resolvePolicyConfig,
   normalizePoNumber,
+  normalizeAccountNumber,
+  normalizeTaxId,
   calculateFinOpsCost,
   auditInvoice,
 };

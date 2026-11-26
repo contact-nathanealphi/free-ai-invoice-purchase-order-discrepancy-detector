@@ -14,7 +14,7 @@ ATURAN EKSTRAKSI KETAT (ENTERPRISE AP v2):
    - Ekstrak SETIAP baris barang, jasa, maupun biaya tambahan (mis. Handling Fee / Admin Fee) ke dalam array `line_items` secara lengkap lintas halaman.
    - Untuk `ppn_amount` isi nominal PPN/VAT (atau `0` jika tidak ada). Untuk `pph23_amount` isi nominal potongan PPh 23 sebagai angka POSITIF (atau `0` jika tidak ada pemotongan PPh 23).
    - Ekstrak angka PERSIS seperti yang tercetak pada faktur. DILARANG mengoreksi, menghitung ulang, atau membenarkan kesalahan hitung pajak maupun selisih harga.
-   - Jika tertera, ekstrak juga `invoice_date` (YYYY-MM-DD), `due_date` (YYYY-MM-DD), dan `payment_terms` (mis. `2/10 Net 30`, `Net 30`).
+   - Jika tertera, ekstrak juga `invoice_date` (YYYY-MM-DD), `due_date` (YYYY-MM-DD), `payment_terms` (mis. `2/10 Net 30`, `Net 30`), `vendor_npwp`, serta detail rekening transfer (`bank_name`, `bank_account_number`, `bank_account_holder`) persis seperti tercetak.
 
 3. Penilaian `confidence_score` & Strict Confidence Calibration (WAJIB, rentang 0.0 sampai 1.0):
    - 0.90 - 1.00: Dokumen tajam, bebas noise berat, dan seluruh field vital (termasuk seluruh baris `line_items`, `subtotal`, `ppn_amount`, `grand_total`) terbaca 100% jelas tanpa keraguan sedikit pun.

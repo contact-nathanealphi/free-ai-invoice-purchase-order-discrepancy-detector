@@ -92,7 +92,12 @@
   }
 
   function csvCell(val) {
-    return `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const raw = val ?? '';
+    let str = String(raw);
+    if (typeof raw === 'string' && /^[\s]*[=+\-@\t\r]/.test(str)) {
+      str = `'${str}`;
+    }
+    return `"${str.replace(/"/g, '""')}"`;
   }
 
   /**

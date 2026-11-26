@@ -30,7 +30,7 @@
   let memoryCache = { purchaseOrders: [], auditLogs: [], itemAliases: [] };
   let byokCache = {
     provider: 'gemini',
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3.8-flash',
     apiKey: '',
     localBaseUrl: 'http://localhost:11434/v1',
     localModel: 'qwen2.5:7b',
@@ -138,8 +138,8 @@
       .replace(/^-+|-+$/g, '');
   }
 
-  async function fetchSeedFromServer() {
-    const res = await fetch('/api/dashboard');
+  async function fetchSeedFromServer({ seedOnly = false } = {}) {
+    const res = await fetch(seedOnly ? '/api/dashboard?seed=1' : '/api/dashboard');
     const data = await res.json();
     if (!res.ok || !data.ok) {
       throw new Error(data.error || 'Failed to fetch initial seed data.');
@@ -450,8 +450,7 @@
   }
 
   async function resetToDefaultDemo() {
-    await fetch('/api/reset', { method: 'POST' }).catch(() => {});
-    const seeded = await fetchSeedFromServer();
+    const seeded = await fetchSeedFromServer({ seedOnly: true });
     await saveWorkspace(seeded);
     return seeded;
   }
@@ -482,9 +481,11 @@
   async function markAuditLogPaid(logId, { paid_date, payment_ref = '' } = {}) {
     const ws = getWorkspace();
     let targetPoNumber = null;
+    let isPartialInvoice = false;
     const nextLogs = (ws.auditLogs || []).map((log) => {
       if (log.id !== logId) return log;
       targetPoNumber = log.po_number;
+      isPartialInvoice = String(log.audit_status || '').toUpperCase() === 'APPROVED - PARTIAL';
       return {
         ...log,
         payment_status: 'PAID',
@@ -494,9 +495,15 @@
     });
 
     const canonical = targetPoNumber ? normalizePo(targetPoNumber) : '';
-    const nextPOs = (ws.purchaseOrders || []).map((po) =>
-      canonical && normalizePo(po.po_number) === canonical ? { ...po, status: 'CLOSED' } : po
-    );
+    const nextPOs = (ws.purchaseOrders || []).map((po) => {
+      if (!canonical || normalizePo(po.po_number) !== canonical) return po;
+      const items = Array.isArray(po.items) ? po.items : [];
+      const hasOpenRemaining = items.some((i) => Number(i.remaining_qty ?? i.qty) > 0);
+      if (isPartialInvoice && hasOpenRemaining) {
+        return po;
+      }
+      return { ...po, status: 'CLOSED' };
+    });
 
     return saveWorkspace({ ...ws, purchaseOrders: nextPOs, auditLogs: nextLogs });
   }
@@ -538,7 +545,7 @@
   async function saveByokConfig(cfg) {
     const next = {
       provider: cfg.provider || 'gemini',
-      model: cfg.model || 'gemini-2.5-flash',
+      model: cfg.model || 'gemini-3.8-flash',
       apiKey: String(cfg.apiKey || '').trim(),
       localBaseUrl: String(cfg.localBaseUrl || byokCache.localBaseUrl || 'http://localhost:11434/v1').trim(),
       localModel: String(cfg.localModel || byokCache.localModel || 'qwen2.5:7b').trim(),
@@ -551,7 +558,7 @@
   async function clearByokConfig() {
     const next = {
       provider: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       apiKey: '',
       localBaseUrl: 'http://localhost:11434/v1',
       localModel: 'qwen2.5:7b',

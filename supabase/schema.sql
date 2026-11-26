@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   latency_ms INTEGER,
   cost_idr NUMERIC(12, 2) DEFAULT 0,
   reviewer_action TEXT,
-  reviewer_note TEXT
+  reviewer_note TEXT,
+  created_by TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC);
@@ -227,3 +228,79 @@ VALUES
     4.88
   )
 ON CONFLICT (id) DO NOTHING;
+
+-- 6. Vendor Master (Anti-BEC Bank Account & NPWP Fraud Guard)
+CREATE TABLE IF NOT EXISTS vendor_master (
+  vendor_code TEXT PRIMARY KEY,
+  vendor_name TEXT NOT NULL UNIQUE,
+  npwp TEXT,
+  bank_name TEXT NOT NULL,
+  bank_account_number TEXT NOT NULL,
+  bank_account_holder TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED', 'BLOCKED')),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_master_name_lower ON vendor_master (LOWER(vendor_name));
+
+INSERT INTO vendor_master (vendor_code, vendor_name, npwp, bank_name, bank_account_number, bank_account_holder, status)
+VALUES
+  ('VND-001', 'PT Andalan Perkakas Nusantara', '01.234.567.8-011.000', 'Bank Mandiri', '1230004567890', 'PT Andalan Perkakas Nusantara', 'ACTIVE'),
+  ('VND-002', 'CV Karya Mandiri Logistik', '02.345.678.9-012.000', 'BCA', '5410987654', 'CV Karya Mandiri Logistik', 'ACTIVE'),
+  ('VND-003', 'PT Konsultan Digital Prima', '03.456.789.0-013.000', 'BNI', '0891234567', 'PT Konsultan Digital Prima', 'ACTIVE'),
+  ('VND-004', 'PT Graha Suplai Kantor', '04.567.890.1-014.000', 'BCA', '2730112233', 'PT Graha Suplai Kantor', 'ACTIVE'),
+  ('VND-005', 'PT Sentra Komponen Elektronik', '05.678.901.2-015.000', 'Bank Mandiri', '1240009988776', 'PT Sentra Komponen Elektronik', 'ACTIVE'),
+  ('VND-006', 'PT Global Teknologi Niaga', '06.789.012.3-016.000', 'CIMB Niaga', '800123456700', 'PT Global Teknologi Niaga', 'ACTIVE'),
+  ('VND-007', 'PT Sumber Kemasan', '07.890.123.4-017.000', 'BCA', '3190445566', 'PT Sumber Kemasan', 'ACTIVE'),
+  ('VND-008', 'CV Prima Kerta Abadi', '08.901.234.5-018.000', 'BRI', '020601001234301', 'CV Prima Kerta Abadi', 'ACTIVE')
+ON CONFLICT (vendor_code) DO NOTHING;
+
+-- 7. Immutable Append-Only Audit Events Trail (SOX / ISO 27001 Governance)
+CREATE TABLE IF NOT EXISTS audit_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  audit_log_id UUID NOT NULL,
+  actor_id TEXT NOT NULL,
+  actor_role TEXT NOT NULL,
+  action TEXT NOT NULL,
+  previous_status TEXT,
+  next_status TEXT NOT NULL,
+  reason TEXT,
+  ip_address TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_log_id ON audit_events (audit_log_id, created_at ASC);
+
+-- 8. Row Level Security (Service-role backend only; blocks direct anon/public access)
+ALTER TABLE purchase_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vendor_master ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "purchase_orders_service_role_all" ON purchase_orders;
+CREATE POLICY "purchase_orders_service_role_all" ON purchase_orders
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "audit_logs_service_role_all" ON audit_logs;
+CREATE POLICY "audit_logs_service_role_all" ON audit_logs
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "vendor_master_service_role_all" ON vendor_master;
+CREATE POLICY "vendor_master_service_role_all" ON vendor_master
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "audit_events_service_role_all" ON audit_events;
+CREATE POLICY "audit_events_service_role_all" ON audit_events
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);

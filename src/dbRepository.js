@@ -296,6 +296,92 @@ function getDefaultSeedAuditLogs() {
   ];
 }
 
+function getDefaultSeedVendors() {
+  const updatedAt = new Date().toISOString();
+  return [
+    {
+      vendor_code: 'VND-001',
+      vendor_name: 'PT Andalan Perkakas Nusantara',
+      npwp: '01.234.567.8-011.000',
+      bank_name: 'Bank Mandiri',
+      bank_account_number: '1230004567890',
+      bank_account_holder: 'PT Andalan Perkakas Nusantara',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-002',
+      vendor_name: 'CV Karya Mandiri Logistik',
+      npwp: '02.345.678.9-012.000',
+      bank_name: 'BCA',
+      bank_account_number: '5410987654',
+      bank_account_holder: 'CV Karya Mandiri Logistik',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-003',
+      vendor_name: 'PT Konsultan Digital Prima',
+      npwp: '03.456.789.0-013.000',
+      bank_name: 'BNI',
+      bank_account_number: '0891234567',
+      bank_account_holder: 'PT Konsultan Digital Prima',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-004',
+      vendor_name: 'PT Graha Suplai Kantor',
+      npwp: '04.567.890.1-014.000',
+      bank_name: 'BCA',
+      bank_account_number: '2730112233',
+      bank_account_holder: 'PT Graha Suplai Kantor',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-005',
+      vendor_name: 'PT Sentra Komponen Elektronik',
+      npwp: '05.678.901.2-015.000',
+      bank_name: 'Bank Mandiri',
+      bank_account_number: '1240009988776',
+      bank_account_holder: 'PT Sentra Komponen Elektronik',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-006',
+      vendor_name: 'PT Global Teknologi Niaga',
+      npwp: '06.789.012.3-016.000',
+      bank_name: 'CIMB Niaga',
+      bank_account_number: '800123456700',
+      bank_account_holder: 'PT Global Teknologi Niaga',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-007',
+      vendor_name: 'PT Sumber Kemasan',
+      npwp: '07.890.123.4-017.000',
+      bank_name: 'BCA',
+      bank_account_number: '3190445566',
+      bank_account_holder: 'PT Sumber Kemasan',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+    {
+      vendor_code: 'VND-008',
+      vendor_name: 'CV Prima Kerta Abadi',
+      npwp: '08.901.234.5-018.000',
+      bank_name: 'BRI',
+      bank_account_number: '020601001234301',
+      bank_account_holder: 'CV Prima Kerta Abadi',
+      status: 'ACTIVE',
+      updated_at: updatedAt,
+    },
+  ];
+}
+
 /**
  * Flattens JSONB purchase_orders rows into flat item rows compatible with auditInvoice().
  * @param {Array<object>} purchaseOrders
@@ -339,17 +425,29 @@ function getSupabaseClient() {
   });
 }
 
+const ledgerMutexes = new Map();
+
 function createRepository(options = {}) {
-  const ledgerPath = options.ledgerPath || DEFAULT_LOCAL_LEDGER_PATH;
+  const ledgerPath = options.ledgerPath || process.env.LOCAL_LEDGER_PATH || DEFAULT_LOCAL_LEDGER_PATH;
+  const resolvedLedgerKey = path.resolve(ledgerPath);
   const forceLocal = Boolean(options.forceLocal);
   const useSupabase = !forceLocal && isSupabaseConfigured();
   const supabase = useSupabase ? getSupabaseClient() : null;
+
+  function withLedgerLock(fn) {
+    const prev = ledgerMutexes.get(resolvedLedgerKey) || Promise.resolve();
+    const run = prev.then(() => fn(), () => fn());
+    ledgerMutexes.set(resolvedLedgerKey, run.catch(() => {}));
+    return run;
+  }
 
   function readLocalLedger() {
     if (!fs.existsSync(ledgerPath)) {
       const initial = {
         purchase_orders: getDefaultSeedPurchaseOrders(),
         audit_logs: getDefaultSeedAuditLogs(),
+        vendor_master: getDefaultSeedVendors(),
+        audit_events: [],
       };
       writeLocalLedger(initial);
       return initial;
@@ -361,12 +459,20 @@ function createRepository(options = {}) {
     if (!Array.isArray(parsed.audit_logs)) {
       parsed.audit_logs = [];
     }
+    if (!Array.isArray(parsed.vendor_master) || parsed.vendor_master.length === 0) {
+      parsed.vendor_master = getDefaultSeedVendors();
+    }
+    if (!Array.isArray(parsed.audit_events)) {
+      parsed.audit_events = [];
+    }
     return parsed;
   }
 
   function writeLocalLedger(data) {
     fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
-    fs.writeFileSync(ledgerPath, JSON.stringify(data, null, 2), 'utf8');
+    const tmpPath = `${ledgerPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmpPath, ledgerPath);
   }
 
   async function getPurchaseOrders() {
@@ -414,6 +520,7 @@ function createRepository(options = {}) {
       cost_idr: entry.cost_idr ?? 0,
       reviewer_action: entry.reviewer_action || null,
       reviewer_note: entry.reviewer_note || null,
+      created_by: entry.created_by || null,
     };
 
     if (supabase) {
@@ -426,10 +533,12 @@ function createRepository(options = {}) {
       return data;
     }
 
-    const ledger = readLocalLedger();
-    ledger.audit_logs.unshift(record);
-    writeLocalLedger(ledger);
-    return record;
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      ledger.audit_logs.unshift(record);
+      writeLocalLedger(ledger);
+      return record;
+    });
   }
 
   async function updatePurchaseOrderBalances(poNumber, billedLines = []) {
@@ -482,28 +591,106 @@ function createRepository(options = {}) {
       return data;
     }
 
-    const ledger = readLocalLedger();
-    const idx = ledger.purchase_orders.findIndex((po) => po.po_number === targetPo.po_number);
-    if (idx !== -1) {
-      ledger.purchase_orders[idx] = {
-        ...ledger.purchase_orders[idx],
-        items: updatedItems,
-        status: nextStatus,
-      };
-      writeLocalLedger(ledger);
-      return ledger.purchase_orders[idx];
-    }
-    return null;
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      const idx = ledger.purchase_orders.findIndex((po) => po.po_number === targetPo.po_number);
+      if (idx !== -1) {
+        ledger.purchase_orders[idx] = {
+          ...ledger.purchase_orders[idx],
+          items: updatedItems,
+          status: nextStatus,
+        };
+        writeLocalLedger(ledger);
+        return ledger.purchase_orders[idx];
+      }
+      return null;
+    });
   }
 
-  async function resolveAuditLog(id, action, note = '') {
+  async function getAuditLogById(id) {
+    if (!id) return null;
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('audit_logs')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+      if (error) throw new Error(`Supabase getAuditLogById error: ${error.message}`);
+      return data || null;
+    }
+    const ledger = readLocalLedger();
+    return ledger.audit_logs.find((log) => log.id === id) || null;
+  }
+
+  async function appendAuditEvent(event) {
+    const record = {
+      id: event.id || crypto.randomUUID(),
+      audit_log_id: event.audit_log_id,
+      actor_id: String(event.actor_id || 'system-admin').trim(),
+      actor_role: String(event.actor_role || 'FINANCE_MANAGER').trim().toUpperCase(),
+      action: String(event.action || '').trim().toUpperCase(),
+      previous_status: event.previous_status || null,
+      next_status: String(event.next_status || '').trim(),
+      reason: event.reason || null,
+      ip_address: event.ip_address || null,
+      created_at: event.created_at || new Date().toISOString(),
+    };
+    if (!record.audit_log_id || !record.action || !record.next_status) {
+      throw new Error('audit_log_id, action, dan next_status wajib diisi untuk audit_events.');
+    }
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('audit_events')
+        .insert([record])
+        .select()
+        .single();
+      if (error) throw new Error(`Supabase appendAuditEvent error: ${error.message}`);
+      return data;
+    }
+
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      ledger.audit_events.push(record);
+      writeLocalLedger(ledger);
+      return record;
+    });
+  }
+
+  async function getAuditEvents(auditLogId = null) {
+    if (supabase) {
+      let query = supabase
+        .from('audit_events')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (auditLogId) {
+        query = query.eq('audit_log_id', auditLogId);
+      }
+      const { data, error } = await query;
+      if (error) throw new Error(`Supabase getAuditEvents error: ${error.message}`);
+      return data || [];
+    }
+    const events = readLocalLedger().audit_events;
+    const filtered = auditLogId ? events.filter((e) => e.audit_log_id === auditLogId) : events;
+    return [...filtered].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+  }
+
+  async function resolveAuditLog(id, action, note = '', meta = {}) {
     if (!id) throw new Error('Audit log ID wajib diisi.');
     const normalizedAction = String(action || '').trim().toUpperCase();
-    const allowed = new Set(['MANUAL APPROVED', 'REJECTED TO VENDOR']);
+    const allowed = new Set(['MANUAL APPROVED', 'REJECTED TO VENDOR', 'PENDING_CFO_APPROVAL']);
     if (!allowed.has(normalizedAction)) {
       throw new Error(`Aksi tidak valid: ${action}. Gunakan MANUAL APPROVED atau REJECTED TO VENDOR.`);
     }
 
+    const existing = await getAuditLogById(id);
+    if (!existing) {
+      throw new Error(`Audit log dengan ID "${id}" tidak ditemukan.`);
+    }
+    const previousStatus = existing.audit_status || null;
+    const eventAction = meta.event_action || (normalizedAction === 'PENDING_CFO_APPROVAL' ? 'ESCALATED_TO_CFO' : normalizedAction);
+
+    let updated;
     if (supabase) {
       const { data, error } = await supabase
         .from('audit_logs')
@@ -516,22 +703,40 @@ function createRepository(options = {}) {
         .select()
         .single();
       if (error) throw new Error(`Supabase resolveAuditLog error: ${error.message}`);
-      return data;
+      updated = data;
+    } else {
+      updated = await withLedgerLock(() => {
+        const ledger = readLocalLedger();
+        const idx = ledger.audit_logs.findIndex((log) => log.id === id);
+        if (idx === -1) {
+          throw new Error(`Audit log dengan ID "${id}" tidak ditemukan.`);
+        }
+        ledger.audit_logs[idx] = {
+          ...ledger.audit_logs[idx],
+          audit_status: normalizedAction,
+          reviewer_action: normalizedAction,
+          reviewer_note: note || null,
+        };
+        writeLocalLedger(ledger);
+        return ledger.audit_logs[idx];
+      });
     }
 
-    const ledger = readLocalLedger();
-    const idx = ledger.audit_logs.findIndex((log) => log.id === id);
-    if (idx === -1) {
-      throw new Error(`Audit log dengan ID "${id}" tidak ditemukan.`);
-    }
-    ledger.audit_logs[idx] = {
-      ...ledger.audit_logs[idx],
-      audit_status: normalizedAction,
-      reviewer_action: normalizedAction,
-      reviewer_note: note || null,
+    const latestEvent = await appendAuditEvent({
+      audit_log_id: id,
+      actor_id: meta.actor_id || 'system-admin',
+      actor_role: meta.actor_role || 'FINANCE_MANAGER',
+      action: eventAction,
+      previous_status: previousStatus,
+      next_status: normalizedAction,
+      reason: note || null,
+      ip_address: meta.ip_address || null,
+    });
+
+    return {
+      ...updated,
+      latest_event: latestEvent,
     };
-    writeLocalLedger(ledger);
-    return ledger.audit_logs[idx];
   }
 
   async function resetSandboxData() {
@@ -558,11 +763,15 @@ function createRepository(options = {}) {
       return { mode: 'supabase', purchase_orders_count: seedPOs.length, audit_logs_count: seedLogs.length };
     }
 
-    writeLocalLedger({
-      purchase_orders: seedPOs,
-      audit_logs: seedLogs,
+    return withLedgerLock(() => {
+      writeLocalLedger({
+        purchase_orders: seedPOs,
+        audit_logs: seedLogs,
+        vendor_master: getDefaultSeedVendors(),
+        audit_events: [],
+      });
+      return { mode: 'local_ledger', purchase_orders_count: seedPOs.length, audit_logs_count: seedLogs.length };
     });
-    return { mode: 'local_ledger', purchase_orders_count: seedPOs.length, audit_logs_count: seedLogs.length };
   }
 
   async function createPurchaseOrder(poData) {
@@ -627,13 +836,15 @@ function createRepository(options = {}) {
       return data;
     }
 
-    const ledger = readLocalLedger();
-    if (ledger.purchase_orders.some((p) => normalizePoNumber(p.po_number) === normalizePoNumber(poNumber))) {
-      throw new Error(`Purchase Order "${poNumber}" sudah ada.`);
-    }
-    ledger.purchase_orders.push(newPo);
-    writeLocalLedger(ledger);
-    return newPo;
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      if (ledger.purchase_orders.some((p) => normalizePoNumber(p.po_number) === normalizePoNumber(poNumber))) {
+        throw new Error(`Purchase Order "${poNumber}" sudah ada.`);
+      }
+      ledger.purchase_orders.push(newPo);
+      writeLocalLedger(ledger);
+      return newPo;
+    });
   }
 
   async function updateGoodsReceipt(poNumber, itemsGrn = []) {
@@ -675,14 +886,86 @@ function createRepository(options = {}) {
       return data;
     }
 
-    const ledger = readLocalLedger();
-    const idx = ledger.purchase_orders.findIndex((po) => po.po_number === targetPo.po_number);
-    ledger.purchase_orders[idx] = {
-      ...ledger.purchase_orders[idx],
-      items: updatedItems,
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      const idx = ledger.purchase_orders.findIndex((po) => po.po_number === targetPo.po_number);
+      ledger.purchase_orders[idx] = {
+        ...ledger.purchase_orders[idx],
+        items: updatedItems,
+      };
+      writeLocalLedger(ledger);
+      return ledger.purchase_orders[idx];
+    });
+  }
+
+  async function getVendors() {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('vendor_master')
+        .select('*')
+        .order('vendor_code', { ascending: true });
+      if (error) throw new Error(`Supabase getVendors error: ${error.message}`);
+      return data || [];
+    }
+    return readLocalLedger().vendor_master;
+  }
+
+  async function upsertVendor(vendorData) {
+    const vendorName = String(vendorData?.vendor_name || '').trim();
+    const bankName = String(vendorData?.bank_name || '').trim();
+    const bankAccountNumber = String(vendorData?.bank_account_number || '').trim();
+    const bankAccountHolder = String(vendorData?.bank_account_holder || vendorName).trim();
+    const npwp = String(vendorData?.npwp || '').trim() || null;
+    const status = String(vendorData?.status || 'ACTIVE').trim().toUpperCase();
+
+    if (!vendorName || !bankName || !bankAccountNumber) {
+      throw new Error('vendor_name, bank_name, dan bank_account_number wajib diisi.');
+    }
+    if (!['ACTIVE', 'SUSPENDED', 'BLOCKED'].includes(status)) {
+      throw new Error('status vendor harus ACTIVE, SUSPENDED, atau BLOCKED.');
+    }
+
+    const vendorCode =
+      String(vendorData?.vendor_code || '').trim().toUpperCase() ||
+      `VND-${crypto.createHash('sha256').update(vendorName.toLowerCase()).digest('hex').slice(0, 6).toUpperCase()}`;
+
+    const record = {
+      vendor_code: vendorCode,
+      vendor_name: vendorName,
+      npwp,
+      bank_name: bankName,
+      bank_account_number: bankAccountNumber,
+      bank_account_holder: bankAccountHolder,
+      status,
+      updated_at: new Date().toISOString(),
     };
-    writeLocalLedger(ledger);
-    return ledger.purchase_orders[idx];
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('vendor_master')
+        .upsert([record], { onConflict: 'vendor_code' })
+        .select()
+        .single();
+      if (error) throw new Error(`Supabase upsertVendor error: ${error.message}`);
+      return data;
+    }
+
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      const targetName = vendorName.toLowerCase();
+      const idx = ledger.vendor_master.findIndex(
+        (v) =>
+          v.vendor_code === vendorCode ||
+          String(v.vendor_name || '').trim().toLowerCase() === targetName
+      );
+      if (idx >= 0) {
+        ledger.vendor_master[idx] = { ...ledger.vendor_master[idx], ...record };
+      } else {
+        ledger.vendor_master.push(record);
+      }
+      writeLocalLedger(ledger);
+      return idx >= 0 ? ledger.vendor_master[idx] : record;
+    });
   }
 
   return {
@@ -690,6 +973,11 @@ function createRepository(options = {}) {
     ledgerPath,
     getPurchaseOrders,
     getAuditLogs,
+    getAuditLogById,
+    appendAuditEvent,
+    getAuditEvents,
+    getVendors,
+    upsertVendor,
     insertAuditLog,
     updatePurchaseOrderBalances,
     resolveAuditLog,
@@ -702,6 +990,8 @@ function createRepository(options = {}) {
 module.exports = {
   createRepository,
   getDefaultSeedPurchaseOrders,
+  getDefaultSeedAuditLogs,
+  getDefaultSeedVendors,
   flattenPurchaseOrdersForAudit,
   isSupabaseConfigured,
 };

@@ -9,6 +9,8 @@ const auditHandler = require('../api/audit');
 const resolveHandler = require('../api/resolve');
 const resetHandler = require('../api/reset');
 const posHandler = require('../api/pos');
+const vendorsHandler = require('../api/vendors');
+const auditEventsHandler = require('../api/audit-events');
 const extractPoHandler = require('../api/extract-po');
 
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
@@ -28,6 +30,8 @@ const API_ROUTES = {
   '/api/resolve': resolveHandler,
   '/api/reset': resetHandler,
   '/api/pos': posHandler,
+  '/api/vendors': vendorsHandler,
+  '/api/audit-events': auditEventsHandler,
   '/api/extract-po': extractPoHandler,
 };
 
@@ -92,6 +96,10 @@ function createLocalServer() {
     const ext = path.extname(filePath).toLowerCase();
     res.statusCode = 200;
     res.setHeader('Content-Type', MIME_TYPES[ext] || 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
     if (ext === '.html') {
       const html = fs.readFileSync(filePath, 'utf8');

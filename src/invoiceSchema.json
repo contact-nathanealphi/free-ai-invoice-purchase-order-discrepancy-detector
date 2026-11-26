@@ -83,6 +83,22 @@
     "payment_terms": {
       "type": "STRING",
       "description": "Syarat pembayaran pada faktur seperti '2/10 Net 30', 'Net 14', atau 'Net 30' jika tertera"
+    },
+    "vendor_npwp": {
+      "type": "STRING",
+      "description": "Nomor NPWP vendor (15 atau 16 digit) yang tercetak pada faktur jika tertera"
+    },
+    "bank_name": {
+      "type": "STRING",
+      "description": "Nama bank tujuan transfer pembayaran yang tercetak pada faktur jika tertera"
+    },
+    "bank_account_number": {
+      "type": "STRING",
+      "description": "Nomor rekening bank tujuan transfer yang tercetak pada faktur jika tertera"
+    },
+    "bank_account_holder": {
+      "type": "STRING",
+      "description": "Nama pemilik rekening bank tujuan transfer yang tercetak pada faktur jika tertera"
     }
   },
   "required": [
