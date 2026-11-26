@@ -431,8 +431,8 @@ function createRepository(options = {}) {
   const ledgerPath = options.ledgerPath || process.env.LOCAL_LEDGER_PATH || DEFAULT_LOCAL_LEDGER_PATH;
   const resolvedLedgerKey = path.resolve(ledgerPath);
   const forceLocal = Boolean(options.forceLocal);
-  const useSupabase = !forceLocal && isSupabaseConfigured();
-  const supabase = useSupabase ? getSupabaseClient() : null;
+  const useSupabase = Boolean(options.supabaseClient) || (!forceLocal && isSupabaseConfigured());
+  const supabase = options.supabaseClient || (useSupabase ? getSupabaseClient() : null);
 
   function withLedgerLock(fn) {
     const prev = ledgerMutexes.get(resolvedLedgerKey) || Promise.resolve();
@@ -521,6 +521,7 @@ function createRepository(options = {}) {
       reviewer_action: entry.reviewer_action || null,
       reviewer_note: entry.reviewer_note || null,
       created_by: entry.created_by || null,
+      storage_path: entry.storage_path || null,
     };
 
     if (supabase) {
@@ -968,6 +969,165 @@ function createRepository(options = {}) {
     });
   }
 
+  async function recordAuditAndDeductPo({
+    logEntry,
+    billedLines = [],
+    actor = {},
+    ipAddress = null,
+  }) {
+    const actorId = String(actor.actor_id || logEntry?.created_by || 'system-admin').trim();
+    const actorRole = String(actor.actor_role || 'FINANCE_MANAGER').trim().toUpperCase();
+    const shouldDeduct =
+      logEntry &&
+      (logEntry.audit_status === 'APPROVED' || logEntry.audit_status === 'APPROVED - PARTIAL') &&
+      Array.isArray(billedLines) &&
+      billedLines.length > 0;
+
+    if (supabase && typeof supabase.rpc === 'function') {
+      const { data, error } = await supabase.rpc('record_audit_and_deduct_po', {
+        p_log: logEntry,
+        p_billed_lines: shouldDeduct ? billedLines : [],
+        p_actor_id: actorId,
+        p_actor_role: actorRole,
+        p_ip_address: ipAddress,
+      });
+
+      if (!error && data) {
+        return {
+          mode: 'supabase_rpc',
+          audit_log: data.audit_log || data,
+          po_updated: Boolean(data.po_updated),
+          duplicate: Boolean(data.duplicate),
+        };
+      }
+
+      const errCode = String(error?.code || '');
+      const errMsg = String(error?.message || '');
+      const isMissingRpc =
+        errCode === '42883' ||
+        errCode === 'PGRST202' ||
+        /record_audit_and_deduct_po/i.test(errMsg);
+      if (!isMissingRpc) {
+        throw new Error(`Supabase record_audit_and_deduct_po RPC error: ${errMsg}`);
+      }
+
+      // Safe fallback when SQL RPC has not been migrated to the target Supabase instance yet
+      const savedLog = await insertAuditLog(logEntry);
+      await appendAuditEvent({
+        audit_log_id: savedLog.id,
+        actor_id: actorId,
+        actor_role: actorRole,
+        action: 'CREATED',
+        previous_status: null,
+        next_status: savedLog.audit_status,
+        reason: (savedLog.reasons && savedLog.reasons[0]) || 'Initial automated audit completed.',
+        ip_address: ipAddress,
+      });
+      let poUpdated = false;
+      if (shouldDeduct) {
+        const updatedPo = await updatePurchaseOrderBalances(savedLog.po_number, billedLines);
+        poUpdated = Boolean(updatedPo);
+      }
+      return {
+        mode: 'supabase_fallback',
+        audit_log: savedLog,
+        po_updated: poUpdated,
+        duplicate: false,
+      };
+    }
+
+    // Local ledger: execute insert + event + PO balance deduction atomically under module-level mutex
+    return withLedgerLock(() => {
+      const ledger = readLocalLedger();
+      const record = {
+        id: logEntry.id || crypto.randomUUID(),
+        created_at: logEntry.created_at || new Date().toISOString(),
+        file_name: logEntry.file_name || null,
+        file_hash: logEntry.file_hash || null,
+        invoice_number: logEntry.invoice_number || null,
+        po_number: logEntry.po_number || null,
+        vendor_name: logEntry.vendor_name || null,
+        currency: logEntry.currency || 'IDR',
+        grand_total: logEntry.grand_total ?? null,
+        audit_status: logEntry.audit_status,
+        reasons: Array.isArray(logEntry.reasons) ? logEntry.reasons : [],
+        extraction_data: logEntry.extraction_data || null,
+        po_snapshot: logEntry.po_snapshot || null,
+        model_used: logEntry.model_used || null,
+        latency_ms: logEntry.latency_ms ?? null,
+        cost_idr: logEntry.cost_idr ?? 0,
+        reviewer_action: logEntry.reviewer_action || null,
+        reviewer_note: logEntry.reviewer_note || null,
+        created_by: logEntry.created_by || actorId,
+        storage_path: logEntry.storage_path || null,
+      };
+
+      let duplicate = false;
+      if (
+        shouldDeduct &&
+        record.file_hash &&
+        ledger.audit_logs.some((l) => l && l.file_hash === record.file_hash)
+      ) {
+        duplicate = true;
+        record.audit_status = 'HOLD - DUPLICATE';
+        record.reasons = [`Concurrent duplicate file detected (SHA-256: ${record.file_hash.slice(0, 12)}...).`];
+      }
+
+      let poUpdated = false;
+      if (shouldDeduct && !duplicate) {
+        const canonical = normalizePoNumber(record.po_number);
+        const poIdx = ledger.purchase_orders.findIndex(
+          (po) => normalizePoNumber(po.po_number) === canonical
+        );
+        if (poIdx !== -1) {
+          const targetPo = ledger.purchase_orders[poIdx];
+          const updatedItems = (targetPo.items || []).map((item) => {
+            const itemLower = String(item.item_name || '').trim().toLowerCase();
+            const billedQty = billedLines.reduce((sum, line) => {
+              const lineLower = String(line.item_name || '').trim().toLowerCase();
+              const matched =
+                lineLower === itemLower ||
+                (itemLower && (lineLower.includes(itemLower) || itemLower.includes(lineLower))) ||
+                (billedLines.length === 1 && (targetPo.items || []).length === 1);
+              return matched ? sum + (Number(line.qty) || 0) : sum;
+            }, 0);
+            const currentRem = Number(item.remaining_qty ?? item.qty) || 0;
+            return { ...item, remaining_qty: Math.max(0, currentRem - billedQty) };
+          });
+          const allExhausted = updatedItems.every((i) => (Number(i.remaining_qty) || 0) <= 0);
+          ledger.purchase_orders[poIdx] = {
+            ...targetPo,
+            items: updatedItems,
+            status: allExhausted ? 'CLOSED' : 'OPEN',
+          };
+          poUpdated = true;
+        }
+      }
+
+      ledger.audit_logs.unshift(record);
+      ledger.audit_events.push({
+        id: crypto.randomUUID(),
+        audit_log_id: record.id,
+        actor_id: actorId,
+        actor_role: actorRole,
+        action: 'CREATED',
+        previous_status: null,
+        next_status: record.audit_status,
+        reason: (record.reasons && record.reasons[0]) || 'Initial automated audit completed.',
+        ip_address: ipAddress,
+        created_at: new Date().toISOString(),
+      });
+      writeLocalLedger(ledger);
+
+      return {
+        mode: 'local_ledger',
+        audit_log: record,
+        po_updated: poUpdated,
+        duplicate,
+      };
+    });
+  }
+
   return {
     mode: supabase ? 'supabase' : 'local_ledger',
     ledgerPath,
@@ -979,6 +1139,7 @@ function createRepository(options = {}) {
     getVendors,
     upsertVendor,
     insertAuditLog,
+    recordAuditAndDeductPo,
     updatePurchaseOrderBalances,
     resolveAuditLog,
     resetSandboxData,

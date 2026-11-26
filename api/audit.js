@@ -13,13 +13,14 @@ const {
   SUPPORTED_IMAGE_MIMES,
 } = require('../src/aiProviderAdapter');
 const { createRepository, flattenPurchaseOrdersForAudit } = require('../src/dbRepository');
+const { createStorageRepository } = require('../src/storageRepository');
 const sampleCache = require('../src/sampleCache.json');
 const {
   sendJson,
   handleCorsPreflight,
   parseJsonBody,
   getClientIp,
-  checkDailyDemoQuota,
+  checkDailyDemoQuotaAsync,
   isAdminRequest,
   resolveActorContext,
 } = require('../src/apiHelpers');
@@ -134,7 +135,7 @@ module.exports = async function handler(req, res) {
 
       const providerCfg = resolveProviderConfig(req.headers);
       if (!providerCfg.isByok) {
-        const quota = checkDailyDemoQuota(getClientIp(req));
+        const quota = await checkDailyDemoQuotaAsync(getClientIp(req));
         if (!quota.allowed) {
           return sendJson(res, 429, {
             ok: false,
@@ -224,12 +225,31 @@ module.exports = async function handler(req, res) {
     const costIdr = extractionMeta.cost_idr !== null ? extractionMeta.cost_idr : auditResult.estimated_cost_idr;
 
     const actor = resolveActorContext(req);
+    const storageRepo = createStorageRepository();
+    const storageInfo =
+      !hasClientWorkspace && cleanBase64
+        ? await storageRepo.uploadInvoiceDocument({
+            base64Data: cleanBase64,
+            fileName,
+            fileHash,
+            mimeType: normalizedMime,
+          })
+        : {
+            mode: cleanBase64 ? 'local-inline-ephemeral' : 'none',
+            bucket: null,
+            storage_path: null,
+            signed_url: null,
+            signed_url_expires_in: null,
+          };
+
+    const persistInlinePdf = storageInfo.mode !== 'supabase_storage';
     const logPayload = {
       id: crypto.randomUUID(),
       created_at: new Date().toISOString(),
       created_by: actor.actor_id,
       file_name: fileName,
       file_hash: fileHash,
+      storage_path: storageInfo.storage_path,
       mime_type: normalizedMime,
       invoice_number: auditResult.invoice_number,
       po_number: auditResult.po_number,
@@ -244,7 +264,8 @@ module.exports = async function handler(req, res) {
       extraction_data: {
         ...extractedInvoice,
         _checked_rules: auditResult.checked_rules || [],
-        _pdf_base64: cleanBase64,
+        _pdf_base64: persistInlinePdf ? cleanBase64 : '',
+        _storage_path: storageInfo.storage_path,
         _mime_type: normalizedMime,
         _extraction_method: extractionMeta.extraction_method,
         _estimated_tokens_saved_pct: extractionMeta.estimated_tokens_saved_pct,
@@ -259,35 +280,26 @@ module.exports = async function handler(req, res) {
       reviewer_note: null,
     };
 
-    // Only persist to server repo when client is NOT managing its own stateless workspace
-    const savedLog = hasClientWorkspace ? logPayload : await repo.insertAuditLog(logPayload);
-    if (!hasClientWorkspace) {
-      await repo.appendAuditEvent({
-        audit_log_id: savedLog.id,
-        actor_id: actor.actor_id,
-        actor_role: actor.actor_role,
-        action: 'CREATED',
-        previous_status: null,
-        next_status: savedLog.audit_status,
-        reason: auditResult.discrepancy_reason || 'Initial automated audit completed.',
-        ip_address: getClientIp(req),
-      });
-    }
+    const billedLines =
+      Array.isArray(extractedInvoice.line_items) && extractedInvoice.line_items.length > 0
+        ? extractedInvoice.line_items
+        : [
+            {
+              item_name: extractedInvoice.item_name || matchedPo?.items?.[0]?.item_name || '',
+              qty: extractedInvoice.qty || 0,
+            },
+          ];
 
-    if (
-      !hasClientWorkspace &&
-      (auditResult.audit_status === 'APPROVED' || auditResult.audit_status === 'APPROVED - PARTIAL')
-    ) {
-      const billedLines =
-        Array.isArray(extractedInvoice.line_items) && extractedInvoice.line_items.length > 0
-          ? extractedInvoice.line_items
-          : [
-              {
-                item_name: extractedInvoice.item_name || matchedPo?.items?.[0]?.item_name || '',
-                qty: extractedInvoice.qty || 0,
-              },
-            ];
-      await repo.updatePurchaseOrderBalances(auditResult.po_number, billedLines);
+    // Only persist to server repo when client is NOT managing its own stateless workspace
+    let savedLog = logPayload;
+    if (!hasClientWorkspace) {
+      const txResult = await repo.recordAuditAndDeductPo({
+        logEntry: logPayload,
+        billedLines,
+        actor,
+        ipAddress: getClientIp(req),
+      });
+      savedLog = txResult.audit_log;
     }
 
     return sendJson(res, 200, {
@@ -301,6 +313,10 @@ module.exports = async function handler(req, res) {
       forensic_risk_score: forensic.forensic_risk_score,
       forensic_level: forensic.forensic_level,
       pdf_base64: cleanBase64,
+      storage_mode: storageInfo.mode,
+      storage_path: storageInfo.storage_path,
+      signed_url: storageInfo.signed_url,
+      signed_url_expires_in: storageInfo.signed_url_expires_in,
       mime_type: normalizedMime,
       extraction_method: extractionMeta.extraction_method,
       estimated_tokens_saved_pct: extractionMeta.estimated_tokens_saved_pct,

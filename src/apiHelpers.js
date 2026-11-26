@@ -294,6 +294,112 @@ function checkRateLimit(ip) {
   return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count };
 }
 
+function isUpstashConfigured(options = {}) {
+  const url = String(options.redisUrl ?? process.env.UPSTASH_REDIS_REST_URL ?? '').trim();
+  const token = String(options.redisToken ?? process.env.UPSTASH_REDIS_REST_TOKEN ?? '').trim();
+  return Boolean(url && token);
+}
+
+async function incrementUpstashWindow({
+  key,
+  limit,
+  windowSeconds,
+  redisUrl = process.env.UPSTASH_REDIS_REST_URL,
+  redisToken = process.env.UPSTASH_REDIS_REST_TOKEN,
+  fetchImpl = globalThis.fetch,
+}) {
+  const baseUrl = String(redisUrl || '').replace(/\/+$/, '');
+  const resp = await fetchImpl(`${baseUrl}/pipeline`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${redisToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([
+      ['INCR', key],
+      ['TTL', key],
+    ]),
+    signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined,
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Upstash Redis HTTP ${resp.status}`);
+  }
+  const results = await resp.json();
+  const count = Number(results?.[0]?.result);
+  const ttl = Number(results?.[1]?.result);
+  if (!Number.isFinite(count)) {
+    throw new Error('Upstash Redis returned non-numeric INCR result');
+  }
+
+  // Ensure expiration is attached on first increment or if key lacks TTL
+  if (count === 1 || ttl < 0) {
+    await fetchImpl(`${baseUrl}/pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${redisToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify([['EXPIRE', key, windowSeconds]]),
+      signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined,
+    });
+  }
+
+  const allowed = count <= limit;
+  return {
+    allowed,
+    remaining: Math.max(0, limit - count),
+    limit,
+    count,
+    backend: 'upstash_redis',
+  };
+}
+
+async function checkDailyDemoQuotaAsync(ip, options = {}) {
+  const limit = Number(options.limit) || DEMO_DAILY_LIMIT;
+  if (isUpstashConfigured(options)) {
+    try {
+      const dayKey = new Date().toISOString().slice(0, 10);
+      return await incrementUpstashWindow({
+        key: `exacta:demo_quota:${dayKey}:${ip}`,
+        limit,
+        windowSeconds: Math.floor(DEMO_WINDOW_MS / 1000),
+        redisUrl: options.redisUrl,
+        redisToken: options.redisToken,
+        fetchImpl: options.fetchImpl,
+      });
+    } catch {
+      // Fall back to in-memory limiter if Upstash is temporarily unreachable
+    }
+  }
+  return {
+    ...checkDailyDemoQuota(ip, options.store || demoQuotaStore, limit),
+    backend: 'in_memory',
+  };
+}
+
+async function checkRateLimitAsync(ip, options = {}) {
+  const limit = Number(options.limit) || RATE_LIMIT_MAX;
+  if (isUpstashConfigured(options)) {
+    try {
+      return await incrementUpstashWindow({
+        key: `exacta:rate_limit:${ip}`,
+        limit,
+        windowSeconds: Math.floor(RATE_LIMIT_WINDOW_MS / 1000),
+        redisUrl: options.redisUrl,
+        redisToken: options.redisToken,
+        fetchImpl: options.fetchImpl,
+      });
+    } catch {
+      // Fall back to in-memory limiter if Upstash is temporarily unreachable
+    }
+  }
+  return {
+    ...checkRateLimit(ip),
+    backend: 'in_memory',
+  };
+}
+
 module.exports = {
   resolveCorsOrigin,
   sendJson,
@@ -305,7 +411,10 @@ module.exports = {
   resolveActorContext,
   RBAC_ROLES,
   FINANCE_MANAGER_LIMIT_IDR,
+  isUpstashConfigured,
   checkRateLimit,
+  checkRateLimitAsync,
   checkDailyDemoQuota,
+  checkDailyDemoQuotaAsync,
   DEMO_DAILY_LIMIT,
 };

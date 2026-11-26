@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   cost_idr NUMERIC(12, 2) DEFAULT 0,
   reviewer_action TEXT,
   reviewer_note TEXT,
-  created_by TEXT
+  created_by TEXT,
+  storage_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC);
@@ -304,3 +305,136 @@ CREATE POLICY "audit_events_service_role_all" ON audit_events
   TO service_role
   USING (true)
   WITH CHECK (true);
+
+-- 9. Transactional Postgres ACID RPC: Idempotent Audit Insert + Row-Locked PO Deduction + Audit Event
+CREATE OR REPLACE FUNCTION record_audit_and_deduct_po(
+  p_log JSONB,
+  p_billed_lines JSONB DEFAULT '[]'::jsonb,
+  p_actor_id TEXT DEFAULT 'system-admin',
+  p_actor_role TEXT DEFAULT 'FINANCE_MANAGER',
+  p_ip_address TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_log_id UUID;
+  v_po_row purchase_orders%ROWTYPE;
+  v_canonical_po TEXT;
+  v_updated_items JSONB := '[]'::jsonb;
+  v_item JSONB;
+  v_line JSONB;
+  v_billed_qty NUMERIC;
+  v_curr_rem NUMERIC;
+  v_new_rem NUMERIC;
+  v_all_exhausted BOOLEAN := TRUE;
+  v_next_po_status TEXT := NULL;
+  v_po_updated BOOLEAN := FALSE;
+  v_saved_log audit_logs%ROWTYPE;
+  v_file_hash TEXT;
+  v_effective_status TEXT;
+  v_effective_reasons JSONB;
+  v_is_duplicate BOOLEAN := FALSE;
+BEGIN
+  v_log_id := COALESCE(NULLIF(p_log->>'id', '')::uuid, gen_random_uuid());
+  v_file_hash := NULLIF(TRIM(COALESCE(p_log->>'file_hash', '')), '');
+  v_effective_status := p_log->>'audit_status';
+  v_effective_reasons := COALESCE(p_log->'reasons', '[]'::jsonb);
+
+  -- Row-level lock on PO when deducting balances for approved invoices
+  IF v_effective_status IN ('APPROVED', 'APPROVED - PARTIAL')
+     AND NULLIF(TRIM(COALESCE(p_log->>'po_number', '')), '') IS NOT NULL THEN
+    v_canonical_po := UPPER(REGEXP_REPLACE(TRIM(p_log->>'po_number'), '[^A-Za-z0-9]+', '-', 'g'));
+    v_canonical_po := TRIM(BOTH '-' FROM v_canonical_po);
+
+    SELECT * INTO v_po_row
+    FROM purchase_orders
+    WHERE TRIM(BOTH '-' FROM UPPER(REGEXP_REPLACE(po_number, '[^A-Za-z0-9]+', '-', 'g'))) = v_canonical_po
+    FOR UPDATE;
+
+    -- Re-verify file_hash idempotency inside the row-locked transaction to prevent concurrent double-deduction
+    IF v_file_hash IS NOT NULL AND EXISTS (SELECT 1 FROM audit_logs WHERE file_hash = v_file_hash) THEN
+      v_is_duplicate := TRUE;
+      v_effective_status := 'HOLD - DUPLICATE';
+      v_effective_reasons := jsonb_build_array(
+        'Concurrent duplicate file detected inside ACID transaction (SHA-256: ' || LEFT(v_file_hash, 12) || '...).'
+      );
+    ELSIF FOUND THEN
+      FOR v_item IN SELECT * FROM jsonb_array_elements(COALESCE(v_po_row.items, '[]'::jsonb)) LOOP
+        v_billed_qty := 0;
+        FOR v_line IN SELECT * FROM jsonb_array_elements(COALESCE(p_billed_lines, '[]'::jsonb)) LOOP
+          IF LOWER(TRIM(COALESCE(v_line->>'item_name', ''))) = LOWER(TRIM(COALESCE(v_item->>'item_name', ''))) THEN
+            v_billed_qty := v_billed_qty + COALESCE((v_line->>'qty')::numeric, 0);
+          END IF;
+        END LOOP;
+
+        v_curr_rem := COALESCE((v_item->>'remaining_qty')::numeric, (v_item->>'qty')::numeric, 0);
+        v_new_rem := GREATEST(0, v_curr_rem - v_billed_qty);
+        IF v_new_rem > 0 THEN
+          v_all_exhausted := FALSE;
+        END IF;
+
+        v_updated_items := v_updated_items || jsonb_build_array(
+          jsonb_set(v_item, '{remaining_qty}', to_jsonb(v_new_rem), true)
+        );
+      END LOOP;
+
+      v_next_po_status := CASE WHEN v_all_exhausted THEN 'CLOSED' ELSE 'OPEN' END;
+      UPDATE purchase_orders
+      SET items = v_updated_items, status = v_next_po_status
+      WHERE po_number = v_po_row.po_number;
+      v_po_updated := TRUE;
+    END IF;
+  END IF;
+
+  INSERT INTO audit_logs (
+    id, created_at, file_name, file_hash, invoice_number, po_number, vendor_name,
+    currency, grand_total, audit_status, reasons, extraction_data, po_snapshot,
+    model_used, latency_ms, cost_idr, reviewer_action, reviewer_note, created_by, storage_path
+  )
+  VALUES (
+    v_log_id,
+    COALESCE(NULLIF(p_log->>'created_at', '')::timestamptz, NOW()),
+    p_log->>'file_name',
+    v_file_hash,
+    p_log->>'invoice_number',
+    p_log->>'po_number',
+    p_log->>'vendor_name',
+    COALESCE(NULLIF(p_log->>'currency', ''), 'IDR'),
+    NULLIF(p_log->>'grand_total', '')::numeric,
+    v_effective_status,
+    v_effective_reasons,
+    p_log->'extraction_data',
+    p_log->'po_snapshot',
+    p_log->>'model_used',
+    NULLIF(p_log->>'latency_ms', '')::integer,
+    COALESCE(NULLIF(p_log->>'cost_idr', '')::numeric, 0),
+    p_log->>'reviewer_action',
+    p_log->>'reviewer_note',
+    COALESCE(NULLIF(p_log->>'created_by', ''), p_actor_id),
+    p_log->>'storage_path'
+  )
+  RETURNING * INTO v_saved_log;
+
+  INSERT INTO audit_events (
+    audit_log_id, actor_id, actor_role, action, previous_status, next_status, reason, ip_address
+  )
+  VALUES (
+    v_saved_log.id,
+    COALESCE(NULLIF(p_actor_id, ''), 'system-admin'),
+    COALESCE(NULLIF(UPPER(p_actor_role), ''), 'FINANCE_MANAGER'),
+    'CREATED',
+    NULL,
+    v_saved_log.audit_status,
+    COALESCE(p_log->'reasons'->>0, 'Initial automated audit completed.'),
+    p_ip_address
+  );
+
+  RETURN jsonb_build_object(
+    'audit_log', to_jsonb(v_saved_log),
+    'po_updated', v_po_updated,
+    'po_status', v_next_po_status,
+    'duplicate', v_is_duplicate
+  );
+END;
+$$;
